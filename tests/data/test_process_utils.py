@@ -63,7 +63,7 @@ def test_spy_features_has_required_columns():
     result = compute_spy_features(df)
     required = [
         "datetime", "open", "high", "low", "close", "volume",
-        "return_1h", "return_4h", "return_24h",
+        "return_1h", "return_4h", "return_24h", "is_first_bar",
         "vol_24h", "vol_60h", "volume_ratio",
         "rsi_14", "macd", "macd_signal", "macd_diff",
         "bb_upper", "bb_lower", "bb_width",
@@ -94,7 +94,7 @@ def test_vix_features_returns_datetime_and_vix():
     df = _make_vix_df(50)
     result = compute_vix_features(df)
     assert "datetime" in result.columns
-    assert "vix" in result.columns
+    assert "vix_log" in result.columns
     assert "vix_change_1h" in result.columns
 
 

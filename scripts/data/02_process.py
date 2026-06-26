@@ -29,7 +29,7 @@ PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
 # Columns that must be non-NaN in the final feature set.
 # These represent the longest-window indicators; everything shorter will also be non-NaN.
-KEY_COLS = ["return_1h", "vol_60h", "rsi_14", "macd", "bb_upper"]
+KEY_COLS = ["return_1h", "vol_60h", "rsi_14", "macd", "bb_upper", "vix_change_1h"]
 
 
 def main() -> None:

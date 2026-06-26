@@ -34,6 +34,8 @@ def compute_spy_features(df: pd.DataFrame) -> pd.DataFrame:
     # 24 rows ≈ 3-4 trading days (not 24 wall-clock hours).
     df["return_4h"] = df["close"].pct_change(4)
     df["return_24h"] = df["close"].pct_change(24)
+    # True for the first bar of each trading date: return_1h includes overnight gap here.
+    df["is_first_bar"] = df["date"].dt.date != df["date"].dt.date.shift(1)
     df["vol_24h"] = df["return_1h"].rolling(24).std()
     df["vol_60h"] = df["return_1h"].rolling(60).std()
     df["volume_ratio"] = df["volume"] / df["volume"].rolling(24).mean()
@@ -54,10 +56,12 @@ def compute_spy_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_vix_features(df: pd.DataFrame) -> pd.DataFrame:
+    # Raw VIXY close is non-stationary due to VIX futures roll cost (~14000x decay 2011-2025).
+    # Log-transform reduces scale differences; vix_change_1h is inherently stationary.
     df = df.copy()
     vix_change = df["close"].pct_change(1)
     return pd.DataFrame({
         "datetime": df["date"],
-        "vix": df["close"].values,
+        "vix_log": np.log(df["close"].clip(lower=1e-8)).values,
         "vix_change_1h": vix_change.values,
     })
