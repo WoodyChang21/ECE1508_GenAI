@@ -102,3 +102,43 @@ def test_vix_features_drops_raw_close():
     df = _make_vix_df(50)
     result = compute_vix_features(df)
     assert "close" not in result.columns
+
+
+def test_load_year_jsons_reads_and_merges_files():
+    import json
+    import tempfile
+    from pathlib import Path
+    from scripts.data.process_utils import load_year_jsons
+
+    records_2023 = [
+        {"date": "2023-01-03 10:00:00", "open": 380.0, "high": 381.0, "low": 379.0, "close": 380.5, "volume": 1000000},
+        {"date": "2023-01-03 11:00:00", "open": 380.5, "high": 382.0, "low": 380.0, "close": 381.0, "volume": 900000},
+    ]
+    records_2024 = [
+        {"date": "2024-01-02 09:30:00", "open": 470.0, "high": 471.0, "low": 469.0, "close": 470.5, "volume": 1200000},
+    ]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        raw_dir = Path(tmpdir)
+        (raw_dir / "spy").mkdir()
+        (raw_dir / "spy" / "spy_2023.json").write_text(json.dumps(records_2023))
+        (raw_dir / "spy" / "spy_2024.json").write_text(json.dumps(records_2024))
+
+        df = load_year_jsons("spy", raw_dir)
+
+    assert len(df) == 3
+    assert df["date"].is_monotonic_increasing
+    assert pd.api.types.is_datetime64_any_dtype(df["date"])
+
+
+def test_load_year_jsons_raises_when_no_files():
+    import tempfile
+    from pathlib import Path
+    from scripts.data.process_utils import load_year_jsons
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        raw_dir = Path(tmpdir)
+        (raw_dir / "spy").mkdir()  # directory exists but is empty
+
+        with pytest.raises(FileNotFoundError):
+            load_year_jsons("spy", raw_dir)

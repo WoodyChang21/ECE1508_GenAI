@@ -30,6 +30,8 @@ def load_year_jsons(name: str, raw_dir: Path) -> pd.DataFrame:
 def compute_spy_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["return_1h"] = df["close"].pct_change(1)
+    # Row-count based: after market-hours filter, 4 rows ≈ 4 trading hours;
+    # 24 rows ≈ 3-4 trading days (not 24 wall-clock hours).
     df["return_4h"] = df["close"].pct_change(4)
     df["return_24h"] = df["close"].pct_change(24)
     df["vol_24h"] = df["return_1h"].rolling(24).std()
