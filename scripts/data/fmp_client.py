@@ -28,9 +28,14 @@ def fetch_hourly(symbol: str, start: str, end: str, api_key: str) -> list[dict]:
         resp = requests.get(url, params=params, timeout=30)
         resp.raise_for_status()
         chunk = resp.json()
-        if isinstance(chunk, list):
-            records.extend(chunk)
+        if not isinstance(chunk, list):
+            raise ValueError(
+                f"FMP returned unexpected response for {symbol} "
+                f"({current.strftime('%Y-%m-%d')} → {chunk_end.strftime('%Y-%m-%d')}): {chunk}"
+            )
+        records.extend(chunk)
         current = chunk_end + timedelta(days=1)
-        time.sleep(0.3)
+        if current <= end_dt:
+            time.sleep(0.3)
 
     return records

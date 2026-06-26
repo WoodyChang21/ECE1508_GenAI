@@ -49,7 +49,7 @@ def test_api_key_passed_in_query_params():
         mock_get.return_value = _mock_get([])
         fetch_hourly("SPY", "2024-01-01", "2024-12-31", "my_secret_key")
     call_kwargs = mock_get.call_args
-    params = call_kwargs[1].get("params") or call_kwargs[0][1]
+    params = mock_get.call_args.kwargs["params"]
     assert params["apikey"] == "my_secret_key"
 
 
@@ -60,3 +60,13 @@ def test_caret_symbol_is_url_encoded():
         fetch_hourly("^VIX", "2024-01-01", "2024-12-31", "key")
     url_called = mock_get.call_args[0][0]
     assert "%5EVIX" in url_called or "%5evix" in url_called.lower()
+
+
+def test_raises_on_non_list_response():
+    """FMP returns a dict (e.g. error body) when the API key is invalid or quota exceeded."""
+    import pytest
+    error_body = {"Error Message": "Invalid API KEY. Please retry or visit our documentation..."}
+    with patch("scripts.data.fmp_client.requests.get") as mock_get:
+        mock_get.return_value = _mock_get(error_body)
+        with pytest.raises(ValueError, match="FMP returned unexpected response"):
+            fetch_hourly("SPY", "2024-01-01", "2024-12-31", "bad_key")
