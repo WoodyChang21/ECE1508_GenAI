@@ -3,11 +3,11 @@ import requests
 from datetime import datetime, timedelta
 
 BASE_URL = "https://financialmodelingprep.com/stable"
-CHUNK_DAYS = 365
+CHUNK_DAYS = 80
 
 
 def fetch_hourly(symbol: str, start: str, end: str, api_key: str) -> list[dict]:
-    """Download hourly OHLCV from FMP in year-sized chunks. Returns flat list of bar dicts."""
+    """Download hourly OHLCV from FMP in 80-day chunks. Returns flat list of bar dicts."""
     url = f"{BASE_URL}/historical-chart/1hour"
 
     start_dt = datetime.strptime(start, "%Y-%m-%d")
@@ -30,7 +30,7 @@ def fetch_hourly(symbol: str, start: str, end: str, api_key: str) -> list[dict]:
         if not isinstance(chunk, list):
             raise ValueError(
                 f"FMP returned unexpected response for {symbol} "
-                f"({current.strftime('%Y-%m-%d')} to {chunk_end.strftime('%Y-%m-%d')}): {chunk}"
+                f"({current.strftime('%Y-%m-%d')} → {chunk_end.strftime('%Y-%m-%d')}): {chunk}"
             )
         records.extend(chunk)
         current = chunk_end + timedelta(days=1)

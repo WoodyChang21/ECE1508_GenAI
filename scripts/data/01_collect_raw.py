@@ -46,7 +46,7 @@ def collect_symbol(name: str, symbol: str) -> None:
         print(f"  [{name}] Fetching {symbol} {start} to {end} ...", end=" ", flush=True)
         records = fetch_hourly(symbol, start, end, API_KEY)
         out_file.write_text(json.dumps(records, indent=2))
-        print(f"{len(records)} bars saved → {out_file}")
+        print(f"{len(records)} bars saved -> {out_file}")
 
 
 if __name__ == "__main__":
