@@ -191,34 +191,34 @@ eda.ipynb  →  deepar.ipynb  →  patchtst.ipynb  →  comparison.ipynb
 
 ### 3. `notebooks/patchtst.ipynb` — PatchTST Model
 
-**Purpose:** Train PatchTST (patch-based Transformer), tune the lookback window on val, evaluate on the 2024–2025 test set.
+**Purpose:** Train PatchTST (patch-based Transformer) in fully multivariate mode, tune the lookback window on val, evaluate on the 2024–2025 test set.
+
+**Library:** HuggingFace `transformers` (`PatchTSTForPrediction`) — used instead of NeuralForecast because NeuralForecast's PatchTST does not expose multivariate input. HuggingFace implements the original paper's channel-independent architecture where all 21 channels are processed simultaneously.
 
 **Inputs:** `data/splits/train.parquet`, `val.parquet`, `test.parquet`
 
 **Outputs:** `data/predictions/patchtst_preds.parquet`
 
 **Architecture:**
-- Model: Transformer encoder operating on patches of the time series
-- `h=1` — one-step-ahead forecast, quantile output (MQLoss)
-- Covariates: all 20 non-target features via `hist_exog_list` (PatchTST uses only past values — no rollout problem)
-- Patch size is scaled dynamically via `patch_params(input_size)` to ensure ≥ 4 patches
-- Lookback candidates: 24, 60, 120, 240 bars — tuned independently of DeepAR
-- Evaluation: same `cross_validation()` setup as DeepAR
-
-**The 20 PatchTST features:**
-`open, high, low, close, volume, return_4h, return_24h, is_first_bar, vol_24h, vol_60h, volume_ratio, rsi_14, macd, macd_signal, macd_diff, bb_upper, bb_lower, bb_width, vix_log, vix_change_1h`
+- Model: Patch-based Transformer, channel-independent mode (original paper)
+- Input: **21 channels** — `return_1h` (target, channel 0) + all 20 features. PatchTST patches each channel independently across time, applies self-attention within each channel, then predicts all channels at t+1 simultaneously. Only channel 0's prediction is used.
+- DeepAR requires future covariate values due to autoregressive rollout — PatchTST does not (direct forecast), so using all 20 historical features is architecturally valid here
+- Custom `ZScoreScaler` normalises all 21 channels (fit on train only)
+- Prediction intervals: empirical quantiles from val residuals (conformal calibration)
+- Lookback candidates: 24, 60, 120, 240 bars
 
 **What each cell does:**
 | Cell | Content |
 |------|---------|
-| 0 | Colab setup (auto-skipped locally) |
-| 1 | Imports + `patch_params()` helper (scales patch_len/stride to input_size) |
-| 2 | Load splits with all 20 hist_exog columns |
-| 3 | Lookback tuning loop — trains 4 PatchTST models (500 steps each), picks best val MAE |
-| 4 | Final model — trains on train+val (1000 steps), runs cross_validation on test |
-| 5 | Compute and print all 7 test metrics |
-| 6 | Plot: predicted vs actual for first 200 test bars with 80%/90% prediction intervals |
-| 7 | Save predictions to `data/predictions/patchtst_preds.parquet` |
+| 0 | Colab setup — installs `transformers`, clones repo, uploads splits |
+| 1 | Imports: torch, HuggingFace PatchTST, constants |
+| 2 | Helpers: `ZScoreScaler`, `WindowDataset`, `build_model`, `train_model`, `predict_walkforward` |
+| 3 | Load splits, cast bool columns, normalise, print shapes |
+| 4 | Lookback tuning — trains 4 models (500 steps each), saves val predictions from best |
+| 5 | Final model — trains on train+val (1000 steps) |
+| 6 | Walk-forward test predictions, empirical intervals, all 7 metrics |
+| 7 | Plot: predicted vs actual for first 200 test bars with 80%/90% intervals |
+| 8 | Save predictions to `data/predictions/patchtst_preds.parquet` |
 
 **Runtime on Colab T4 GPU:** ~20–40 minutes
 
