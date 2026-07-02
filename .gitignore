@@ -219,3 +219,6 @@ __marimo__/
 
 # Project data — raw downloads excluded; processed outputs committed
 /data/raw/
+
+# PyTorch Lightning training logs (auto-generated, not needed)
+lightning_logs/
