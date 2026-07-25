@@ -9,7 +9,13 @@ HIST_EXOG_COLS = [
     'vix_log', 'vix_change_1h',
 ]
 
-FUTR_EXOG_COLS = ['is_first_bar']
+FUTR_EXOG_COLS = [
+    'is_first_bar', 'is_last_bar',
+    'hour_sin', 'hour_cos',
+    'dow_sin', 'dow_cos', 'is_monday', 'is_friday',
+    'month_sin', 'month_cos', 'is_month_end', 'is_month_start',
+    'is_quarter_end',
+]
 
 
 def load_nf_dataframe(split_path: str, extra_cols: list[str] | None = None) -> pd.DataFrame:
