@@ -65,6 +65,18 @@ How to add an entry after a run:
 - **Sharpe collapsed relative to Run 2** (0.4825→0.1536) and max drawdown got worse again (-23.9%→-31.5%), even though every other metric held steady or improved. This is the clearest evidence yet that Sharpe/Max DD are dominated by incidental path effects rather than tracking real forecasting skill — the point-forecast accuracy barely moved, but the derived trading metric swung by more than half its Run 2 value.
 - The winning config (`input_size=240`, `hidden=64`, `robust`) suggests smaller LSTM capacity paired with outlier-robust scaling squeezes out a little more val MAE than the Run 1/2 default (`hidden=128`, `standard`) — consistent with the "model was probably oversized" hypothesis — but the whole grid is still bunched within ~0.002142–0.002182, i.e. still a flat surface overall.
 
+### Overall conclusion (Runs 1–3)
+
+Three runs — a data-only pass (calendar `futr_exog` features) and a model-only pass (wider tuning grid, conformal intervals, more MC samples) — moved DeepAR only modestly, and mostly on metrics that don't reflect real forecasting skill:
+
+- **Point-forecast accuracy (RMSE/MAE) barely moved across all three runs** (RMSE 0.004169 → 0.004170 → 0.004152; MAE 0.002354 → 0.002373 → 0.002350). Neither the data nor the model changes meaningfully improved the model's ability to predict the actual return value.
+- **Directional accuracy crept up slightly and monotonically** (0.5103 → 0.5180 → 0.5213) but stayed within ~1–2pp of chance the whole way — on a ~2,469-bar test set that's within the statistical noise floor (~1pp standard error), not confirmed signal.
+- **Interval calibration is the one unambiguous win**, and it came from the model-wise pass specifically: conformal calibration (Run 3) pulled both 80%/90% coverage close to their targets, fixing a real, measured defect from Run 1/2's parametric StudentT intervals.
+- **Sharpe and Max Drawdown are not reliable indicators here** — they swung the most of any metric (-0.42 → +0.48 → +0.15; -35.3% → -23.9% → -31.5%) while RMSE/MAE/DirAcc moved smoothly and only slightly. Since the trading-strategy metrics are a path-dependent function of point predictions on a single, short, heavy-tailed test window (kurtosis ~39), these swings look like incidental noise rather than genuine gains or losses in skill. Treat any future Sharpe/Max DD change with the same skepticism until it's checked across multiple random seeds.
+- **Neither the 13-feature calendar set nor the widened model grid overcame the fundamental difficulty of the problem**: forecasting one-step-ahead hourly SPY returns is close to market-efficient noise, and DeepAR at `h=1` seems to be near its practical ceiling for this data — directional accuracy stuck barely above chance is the clearest evidence of that.
+
+**What would move the needle further, if pursued:** feature ablation (isolate which, if any, of the 13 calendar features carry real signal — `hour_sin/cos` is the most plausible candidate given the EDA's overnight-gap/intraday-vol findings), and multi-seed repetition (to establish noise floors for Sharpe/DirAcc before trusting any future delta). Absent those, the honest takeaway is: DeepAR's performance on this task is essentially flat across all three optimization attempts, with calibration being the only concretely fixed problem.
+
 ---
 
 ## PatchTST
