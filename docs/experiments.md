@@ -127,6 +127,7 @@ Three runs — a data-only pass (calendar `futr_exog` features) and a model-only
 - **Sharpe improved substantially** (-0.4484 → -0.0673) though still negative; Max Drawdown got slightly worse (-21.8%→-23.4%). Per the running theme with DeepAR, treat these two as noisy/path-dependent rather than a clean verdict.
 - **Directional accuracy (0.5152) is still close to chance**, but is now PatchTST's best result on this axis across all runs, and slightly ahead of DeepAR's best (0.5213 from DeepAR Run 3 — nearly tied).
 - **Bottom line**: this is the actual fair, methodologically-sound baseline to compare against DeepAR and to optimize further from. `channel_attention=True` — letting `return_1h` actually use information from the other 20 channels, which it structurally still cannot do here — remains the next planned pass and is now motivated by cleaner evidence, since the channel-weighting confound from Run 1 has been removed.
+- **📌 Status update (after Runs 3–4 below): `channel_attention=True` was tested twice and did not outperform Run 2 on any non-debunked metric** (Run 3's dir_acc gain was an artifact; Run 4, with 2x training, reverted to at/below-chance accuracy and worse calibration than this run). **Run 2 is therefore the current best, most defensible PatchTST result**, and is the baseline the Run 2a/2b sub-experiments below build from.
 - **⚠️ Important caveat, easy to miss: this run's PatchTST is functionally univariate, not multivariate.** PatchTST's `channel_attention=False` mode treats each of the 21 channels as a fully independent time series (channels only get folded into the batch dimension for computation — they never attend to or mix with each other in the forward pass). Combined with restricting the loss to channel 0 only, this means the other 20 channels are computed but **discarded**: they contribute zero information to `return_1h`'s forecast and receive zero gradient (nothing in the computation graph connects them to the loss). So despite being fed 21 channels, this run's model is *mathematically equivalent* to training on `return_1h` alone — architecturally different from DeepAR (Transformer vs. LSTM) but informationally no more advantaged. "Fair baseline" here only means *the training objective* became comparable to DeepAR's (loss on the single target, not diluted across 21 channels) — it does **not** mean this run tested the project's actual premise of giving PatchTST genuine covariate access. That test only begins at Run 3 (`channel_attention=True`).
 
 | # | Date | Commit | Data features | Config changes | RMSE | MAE | Dir Acc | Cov 80% | Cov 90% | Sharpe | Max DD |
@@ -202,3 +203,26 @@ Increasing training budget is now a dead end — ruled out with direct evidence 
 **Two concrete next steps, cheapest first:**
 1. **Increase `max_steps`** (e.g. 1000/2000 instead of 500/1000) — cheapest possible test of the "undertrained for the added complexity" hypothesis, no architecture change.
 2. **Reintroduce a conformal recalibration layer** on top of the analytic quantiles (the same technique already used for DeepAR, and for PatchTST's original point-wise run) — this would directly guarantee correct coverage regardless of whether the underlying `scale` parameter is well-calibrated, at the cost of losing the "fully analytic, no post-hoc correction" property Run 2/3 currently have.
+
+**📌 Direction change after Run 4**: given `channel_attention=True` underperformed Run 2 on every non-debunked metric across both attempts (Run 3, Run 4), `patchtst.ipynb` was reverted to Run 2's exact configuration (commit `8083e60`: `channel_attention=False`, channel-0-only loss, `max_steps=500/1000`). All further optimization below builds from **Run 2 specifically**, not from the `channel_attention=True` branch — see the "Run 2-series" sub-experiments that follow.
+
+---
+
+## Run 2-series: architecture sub-experiments on the Run 2 baseline
+
+Everything in this section starts from **Run 2's exact configuration** (`channel_attention=False`, channel-0-only loss, `max_steps=500/1000`, `input_size` tuned over {24,60,120,240}) and changes exactly one thing at a time. Motivation: Run 2 has a residual, unexplained lag-echo (`corr(loc_raw, y[t-1]) = 0.1609`). Since `channel_attention=False` makes `return_1h`'s forecast depend *only* on its own patch history (proven: the other 20 channels receive zero gradient and contribute zero information under this config), this residual correlation can only be coming from how `return_1h`'s own history gets processed — not from feature curation of the other channels, which would be structurally inert here. Two architecture-level (not data-level) hypotheses are being tested, one at a time:
+
+- **Run 2a — pooling mechanism.** Mean-pooling across all patches gives the oldest and newest patch equal weight, which may dilute whatever recency signal exists. Tests switching to "use only the most recent patch's representation" instead of averaging all patches. Code: `POOLING_MODE = 'last_patch'` in `_distribution_params` (`notebooks/patchtst.ipynb`, commit `9b2f337`). Nothing else changed from Run 2.
+- **Run 2b — internal instance normalization (planned, not yet implemented).** PatchTST's own per-window RevIN-style scaler (`win_loc`/`win_scale`) explicitly centers each window on its own local mean — a reasonable inductive bias for trending price levels, but not obviously appropriate for `return_1h`, which has no meaningful "local level" to track (true lag-1 autocorrelation ≈ 0.01). Tests `scaling=None` in `PatchTSTConfig` to remove this internal re-centering entirely.
+
+Each is tested in isolation against Run 2, so any change in `corr(loc_raw, y[t-1])` or the headline metrics can be attributed to that one specific change.
+
+### Run 2a — last-patch pooling
+
+*Pending execution — code implemented and pushed (commit `9b2f337`), not yet run.*
+
+| # | Date | Commit | Base | Change from Run 2 | RMSE | MAE | Dir Acc | Cov 80% | Cov 90% | Sharpe | Max DD | corr(loc_raw, y[t-1]) |
+|---|------|--------|------|--------------------|------|-----|---------|---------|---------|--------|--------|------------------------|
+| 2a | *pending* | `9b2f337` | Run 2 (`8083e60`) | Pooling: mean-pool across all patches → use only the most recent patch's representation | *pending* | *pending* | *pending* | *pending* | *pending* | *pending* | *pending* | *pending* |
+
+**What to look for once run**: does `corr(loc_raw, y[t-1])` move meaningfully from Run 2's 0.1609? If it drops, that supports the recency-dilution hypothesis. Also check RMSE/MAE/Dir Acc/calibration against Run 2's 0.004158/0.002350/0.5152/0.8068/0.9000 — a pooling change that fixes the lag-echo but hurts these would be a mixed result, not a clean win.
