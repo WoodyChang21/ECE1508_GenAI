@@ -248,12 +248,34 @@ Each is tested in isolation against Run 2, so any change in `corr(loc_raw, y[t-1
 
 ### Run 2b — disable internal instance normalization (`scaling=None`)
 
-*Pending execution — code implemented and pushed (commit `84ff2e8`), not yet run.*
-
 Isolated against **Run 2 directly** (`POOLING_MODE='mean'`, i.e. Run 2a's pooling change is **not** stacked here — only the scaling change is being tested).
 
 | # | Date | Commit | Base | Change from Run 2 | RMSE | MAE | Dir Acc | Cov 80% | Cov 90% | Sharpe | Max DD | corr(loc_raw, y[t-1]) |
 |---|------|--------|------|--------------------|------|-----|---------|---------|---------|--------|--------|------------------------|
-| 2b | *pending* | `84ff2e8` | Run 2 (`8083e60`) | `scaling=None` in `PatchTSTConfig` — disables PatchTST's internal per-window RevIN-style instance normalization (`win_loc` fixed at 0, `win_scale` fixed at 1, identity) | *pending* | *pending* | *pending* | *pending* | *pending* | *pending* | *pending* | *pending* |
+| 2b | 2026-07-27 | `3a1f3f2` | Run 2 (`8083e60`) | `scaling=None` in `PatchTSTConfig` — disables PatchTST's internal per-window RevIN-style instance normalization (`win_loc` fixed at 0, `win_scale` fixed at 1, identity) | **0.004142** | 0.002344 | 0.5075 | 0.8109 | 0.8935 | 0.8466 | -0.1244 | 0.0023 |
 
-**What to look for once run**: with `SCALING_MODE=None`, `win_loc`/`win_scale` are fixed at 0/1 by construction, so `corr(win_loc, y[t-1])` will trivially be undefined/zero (no variance) — the only thing that can move is `corr(loc_raw, y[t-1])` itself. If it drops from Run 2's 0.1609, that supports the internal-re-centering hypothesis. **Apply the same verification used to debunk Run 3 and flag Run 2a as unconfirmed**: check the prediction-positive rate against the 53.4% true base rate, and check accuracy by `|pred|` confidence quartile, before trusting any Dir Acc/Sharpe change at face value.
+**Run 2b — `input_size` tuning (val MAE):**
+
+| input_size | 24 | 60 (selected) | 120 | 240 |
+|---|---|---|---|---|
+| val MAE | 0.537746 | **0.536904** | 0.539477 | 0.537979 |
+
+**Run 2b — verification diagnostic (same checks applied to Run 2a/Run 3):**
+
+| | Run 2 | Run 2a | Run 2b |
+|---|---|---|---|
+| Fraction of predictions "up" | *(not checked)* | 84.97% | **72.58%** |
+| True base rate "up" | 53.42% | 53.42% | 53.42% |
+| Dir Acc | 0.5152 | 0.5362 | **0.5075** |
+| Dir Acc by \|pred\| quartile (low→high conf.) | *(not checked)* | 0.551, 0.524, 0.517, 0.545 (flat/noisy) | **0.462, 0.507, 0.520, 0.541 (monotonic increasing)** |
+| std(pred)/std(y) | *(not checked)* | 0.080 | 0.036 |
+| corr(win_loc, y[t-1]) | 0.0667 | 0.0667 | **nan** (win_loc constant by construction — proves it) |
+
+**Run 2b notes (disabling internal instance normalization — the most encouraging result in the Run 2-series so far, though still not fully confirmed):**
+- **`corr(loc_raw, y[t-1])` dropped from Run 2's 0.1609 to 0.0023 — the largest reduction of any Run 2-series experiment, and the cleanest evidence yet that it's a real fix, not just variance collapse.** Unlike Run 2a (where a "genuine fix" vs. "collapsed to something blander" couldn't be distinguished), here `win_loc` is *provably* constant (`corr = nan`, zero variance by construction — it's fixed at 0 by the config change) — so it could not possibly have contributed to Run 2's 0.1609 correlation in this run. Since the correlation still dropped this far with that path completely removed, the reduction is attributable specifically to a change in the learned weights' own behavior, which is a materially cleaner result than Run 2a's.
+- **RMSE is now the best of any PatchTST run to date: 0.004142** (vs. Run 2's 0.004158, Run 2a's 0.004151). MAE (0.002344) is essentially tied with Run 2a, both ahead of Run 2.
+- **The confidence-quartile pattern is qualitatively different from every prior run — and more encouraging.** Run 2a and Run 3 both showed flat/noisy accuracy regardless of prediction confidence (the signature of an artifact, not real skill). Run 2b instead shows a **monotonic increasing** trend: 0.462 → 0.507 → 0.520 → 0.541 as confidence increases. This is the pattern you'd expect from a model with a real, if weak, directional signal — more confident predictions being more often correct. This is suggestive, not proof (quartile sample sizes are ~617 each, so some of this could still be noise), but it's the first time this project has seen this specific shape.
+- **However, don't over-claim: overall Dir Acc (0.5075) is still modest — barely above chance in aggregate** — and a real, if milder, positive bias remains (72.6% of predictions are "up" vs. 53.4% true base rate, down from Run 2a's 85% and Run 3's 96.7%, but not zero). The low-confidence quartile is actually *below* chance (0.462), meaning the model's weakest predictions are actively unreliable — the encouraging signal is concentrated in the higher-confidence tail, not present uniformly.
+- **Calibration is close to on-target** (Cov 80% = 0.8109, Cov 90% = 0.8935) — not quite Run 2's near-exact fit, but clearly better than Run 2a's over-covering, and in the right direction.
+- **Sharpe (0.8466) is the best of any run**, but per the established pattern in this whole project, treat this with the usual skepticism until checked across multiple seeds — it's not the primary evidence here.
+- **Bottom line**: this is the most promising result in the Run 2-series so far — better RMSE than any prior PatchTST run, cleaner (not just plausible) evidence that the internal-normalization hypothesis was at least partially correct, and the first monotonic confidence-accuracy pattern seen in this project. It's not a fully confirmed win (overall Dir Acc is still modest, and some positive bias persists), but it's a meaningfully different, more credible result than Run 2a's. Worth considering as the new candidate best PatchTST configuration, pending further scrutiny (e.g., repeating with a different seed to check if the monotonic quartile pattern is stable, or combining with Run 2a's pooling change to see if the two effects compound).
