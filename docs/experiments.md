@@ -127,3 +127,36 @@ Three runs — a data-only pass (calendar `futr_exog` features) and a model-only
 - **Sharpe improved substantially** (-0.4484 → -0.0673) though still negative; Max Drawdown got slightly worse (-21.8%→-23.4%). Per the running theme with DeepAR, treat these two as noisy/path-dependent rather than a clean verdict.
 - **Directional accuracy (0.5152) is still close to chance**, but is now PatchTST's best result on this axis across all runs, and slightly ahead of DeepAR's best (0.5213 from DeepAR Run 3 — nearly tied).
 - **Bottom line**: this is the actual fair, methodologically-sound baseline to compare against DeepAR and to optimize further from. `channel_attention=True` — letting `return_1h` actually use information from the other 20 channels, which it structurally still cannot do here — remains the next planned pass and is now motivated by cleaner evidence, since the channel-weighting confound from Run 1 has been removed.
+
+| # | Date | Commit | Data features | Config changes | RMSE | MAE | Dir Acc | Cov 80% | Cov 90% | Sharpe | Max DD |
+|---|------|--------|----------------|-----------------|------|-----|---------|---------|---------|--------|--------|
+| 3 | 2026-07-26 | `4714067` | `hist_exog` = all 20 features (fully multivariate) | Same as Run 2, plus: `channel_attention=True` — adds a per-layer cross-channel attention sublayer so `return_1h`'s representation can actually attend to the other 20 channels' patch representations (previously `False`: fully channel-independent, no cross-channel information flow at all). `input_size` tuned over {24,60,120,240} → 240 | 0.004159 | 0.002358 | **0.5362** | 0.7890 | 0.8850 | 0.5254 | -0.2718 |
+
+**Run 3 — `input_size` tuning (val MAE):**
+
+| input_size | 24 | 60 | 120 | 240 (selected) |
+|---|---|---|---|---|
+| val MAE | 0.539819 | 0.538239 | 0.538333 | **0.538231** |
+
+**Run 3 — lag diagnostic (correlation with y[t-1], normalised space):**
+
+| | Run 1 (21-ch loss) | Run 2 (ch-0 loss) | Run 3 (+ channel_attention) |
+|---|---|---|---|
+| corr(loc_raw, y[t-1]) | 0.7604 | 0.1609 | **0.0074** |
+| corr(win_loc, y[t-1]) | 0.0667 | 0.0667 | 0.0667 |
+| corr(final pred, y[t-1]) | 0.8073 | 0.1201 | **0.0721** |
+
+**Run 3 notes (`channel_attention=True` — return_1h can now use the other 20 channels):**
+- **Directional accuracy jumped 0.5152 → 0.5362 (+2.1pp)** — the single largest directional-accuracy gain of any run across either model in this whole project (DeepAR's largest jump was ~0.8pp, itself within noise). At n≈2,469 test bars, the standard error of a proportion is ~1.0pp, so a 2.1pp move is the first result in the project that's plausibly more than pure noise, though still not dramatic.
+- **The lag-echo effect is now essentially gone**: `corr(loc_raw, y[t-1])` dropped further, from 0.16 to **0.0074** — the model's learned signal is now almost completely uncorrelated with the previous bar's return. Combined with the directional-accuracy jump, this is consistent with the model actually using the other 20 channels for something more informative than a persistence heuristic.
+- **RMSE/MAE are essentially unchanged** (0.004158→0.004159, 0.002350→0.002358) — cross-channel attention improved the *directional* signal but not raw point-forecast magnitude accuracy at all.
+- **Interval calibration regressed**: Cov 80% 0.8068→0.7890 and Cov 90% 0.9000→0.8850 — both moved from Run 2's near-exact calibration back toward undercoverage. This is the one clear, directly-attributable cost of this change.
+- **Sharpe improved a lot** (-0.0673→0.5254, the best Sharpe of any PatchTST run) but Max Drawdown got worse (-23.4%→-27.2%) — per the established pattern with DeepAR, these two are noisy/path-dependent and shouldn't be read as confirmation on their own, though it's a nice-looking number alongside a genuine (if modest) directional-accuracy gain this time.
+
+### Biggest remaining problem, and the next optimization to try
+
+**The clearest, most directly attributable problem left is the interval-calibration regression** — not Sharpe/Max DD, which this whole project has repeatedly shown to be too noisy on this test set to trust in isolation. Cov 80%/90% both undercovering (0.7890/0.8850 vs 0.80/0.90 targets) means the model's `scale` parameter is now systematically a bit too narrow — plausibly because `channel_attention=True` roughly doubles the attention computation per layer (an extra full cross-channel attention sublayer, alongside the existing patch-attention one) without any corresponding increase in training budget (`max_steps` is unchanged at 500/1000) or model capacity (`d_model=128`, `num_hidden_layers=3` unchanged) — the model may simply be undertrained relative to its now-more-complex job of jointly calibrating scale across a bigger effective computation graph.
+
+**Two concrete next steps, cheapest first:**
+1. **Increase `max_steps`** (e.g. 1000/2000 instead of 500/1000) — cheapest possible test of the "undertrained for the added complexity" hypothesis, no architecture change.
+2. **Reintroduce a conformal recalibration layer** on top of the analytic quantiles (the same technique already used for DeepAR, and for PatchTST's original point-wise run) — this would directly guarantee correct coverage regardless of whether the underlying `scale` parameter is well-calibrated, at the cost of losing the "fully analytic, no post-hoc correction" property Run 2/3 currently have.
