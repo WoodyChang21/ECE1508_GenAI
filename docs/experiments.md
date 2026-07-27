@@ -83,6 +83,22 @@ Three runs — a data-only pass (calendar `futr_exog` features) and a model-only
 
 | # | Date | Commit | Data features | Config changes | RMSE | MAE | Dir Acc | Cov 80% | Cov 90% | Sharpe | Max DD |
 |---|------|--------|----------------|-----------------|------|-----|---------|---------|---------|--------|--------|
-| 1 | | | `hist_exog` = all 20 features (fully multivariate, channel-independent) | | | | | | | | |
+| 1 | 2026-07-26 | `31448f0` | `hist_exog` = all 20 features (fully multivariate, `channel_attention=False`) | Fair-baseline pass: switched `loss='mse'` → `loss='nll'` with `distribution_output='student_t'`, matching DeepAR's `DistributionLoss`. Point forecast = analytic StudentT mean (`loc`); 80%/90% intervals = analytic quantiles (`scipy.stats.t.ppf`), replacing conformal calibration. Required bypassing a `transformers` library bug: `PatchTSTPredictionHead.forward()`'s final tuple-transpose assumes `prediction_length > 1` and crashes with `IndexError` at `prediction_length=1` when a distribution head is used — both training (manual NLL via `torch.distributions.StudentT.log_prob`) and inference call `model.model(...)` + `model.head.projection(...)` directly to stop short of the broken line. `input_size` tuned over {24,60,120,240} → 240 | 0.004365 | 0.002544 | 0.5006 | 0.7663 | 0.8615 | -0.4484 | -0.2182 |
 
-<!-- Fill in from the last executed patchtst.ipynb run once available -->
+**Run 1 — `input_size` tuning (val MAE):**
+
+| input_size | 24 | 60 | 120 | 240 (selected) |
+|---|---|---|---|---|
+| val MAE | 0.594528 | 0.590923 | 0.576269 | **0.564193** |
+
+**Run 1 notes (fair-baseline pass — distributional loss, data config unchanged):**
+- **For context, the prior (never formally logged) point-wise `loss='mse'` + conformal-calibration run** on this same 21-channel setup scored: RMSE 0.004175, MAE 0.002373, Dir Acc 0.5006, Cov 80% 0.7967, Cov 90% 0.8801, Sharpe -0.0123, Max DD -18.4%. Comparing to that:
+- **RMSE/MAE got slightly worse** (0.004175→0.004365, 0.002373→0.002544) rather than better — switching to NLL did not improve raw point-forecast accuracy here, contrary to what you might hope from "a more principled objective."
+- **Interval calibration also got worse**, not better (Cov 80%: 0.7967→0.7663; Cov 90%: 0.8801→0.8615, both moving further from nominal) — surprising, since the whole point of a native distribution was to get calibration "for free" instead of needing conformal correction. The old conformal-calibrated intervals were, empirically, better calibrated than these new analytic ones.
+- **Directional accuracy is essentially identical** (0.5006 vs 0.5006) — expected, since this axis doesn't depend on the loss family, and confirms (again) the model has ~no directional edge regardless of point-vs-distributional training.
+- **Sharpe got much worse** (-0.0123 → -0.4484) — consistent with the now-familiar pattern that this metric is highly noisy/path-dependent and shouldn't be read as a skill signal on its own.
+- **Plausible explanations for the worse fit, worth investigating before concluding NLL "doesn't work" here**: (a) NLL optimizes mean *and* scale/tail-shape jointly, which can genuinely trade off some point-forecast accuracy against calibration, especially under a fixed, possibly-too-short training budget (same `max_steps=500/1000` as the MSE run); (b) the manual bypass training loop (replicating the library's intended NLL computation by hand, since the library's own path crashes at `prediction_length=1`) could have subtly different numerics than the untested "intended" path — worth a sanity check that the manual loss matches what the library would compute if it worked; (c) StudentT NLL is known to be a harder loss surface to optimize than plain MSE, and may need more steps or a lower/warmed-up learning rate to converge as well.
+- **Bottom line**: the fairness motivation for this change stands (comparable probabilistic modeling to DeepAR), but it did not yet deliver better numbers — this is now the fair baseline to optimize from, not a finish line. `channel_attention=True` (the fix for the "not actually multivariate" issue established earlier) is still the next planned pass.
+
+<!-- Lag-diagnostic check (correlation of pred[t] against true[t], true[t-1], true[t-2], ...) pending —
+data/predictions/patchtst_preds.parquet from this run wasn't copied back from Colab to the local repo. -->
