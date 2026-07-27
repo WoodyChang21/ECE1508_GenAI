@@ -245,3 +245,15 @@ Each is tested in isolation against Run 2, so any change in `corr(loc_raw, y[t-1
 - **Interval calibration regressed** — and in a new direction: Run 2 was almost exactly calibrated (0.8068/0.9000 vs 0.80/0.90 targets); Run 2a now *over*-covers (0.8469/0.9255). Over-covering is a milder problem than under-covering (conservative rather than overconfident), but it's still a real regression from Run 2's excellent calibration.
 - **`corr(loc_raw, y[t-1])` dropped sharply (0.1609→0.0076), but interpret this cautiously**, per the same caveat that applied to Run 3: `std(pred)/std(y)` is only 0.080 — a near-collapsed, low-variance prediction will show low correlation with almost anything by construction, not necessarily because the recency-dilution hypothesis was confirmed. This metric alone can't distinguish "genuinely fixed" from "collapsed to something blander."
 - **Bottom line**: last-patch pooling gave a small, real MAE/RMSE improvement, but reintroduced a milder version of the same positive-bias artifact seen in Run 3, and made calibration worse. Not a clean win over Run 2 — the honest read is "mixed, and the headline-looking numbers (Dir Acc, Sharpe) shouldn't be trusted without this same verification applied every time." Run 2b (`scaling=None`, testing the internal-instance-normalization hypothesis) is still worth running as the other isolated candidate explanation for Run 2's residual lag-echo.
+
+### Run 2b — disable internal instance normalization (`scaling=None`)
+
+*Pending execution — code implemented and pushed (commit `84ff2e8`), not yet run.*
+
+Isolated against **Run 2 directly** (`POOLING_MODE='mean'`, i.e. Run 2a's pooling change is **not** stacked here — only the scaling change is being tested).
+
+| # | Date | Commit | Base | Change from Run 2 | RMSE | MAE | Dir Acc | Cov 80% | Cov 90% | Sharpe | Max DD | corr(loc_raw, y[t-1]) |
+|---|------|--------|------|--------------------|------|-----|---------|---------|---------|--------|--------|------------------------|
+| 2b | *pending* | `84ff2e8` | Run 2 (`8083e60`) | `scaling=None` in `PatchTSTConfig` — disables PatchTST's internal per-window RevIN-style instance normalization (`win_loc` fixed at 0, `win_scale` fixed at 1, identity) | *pending* | *pending* | *pending* | *pending* | *pending* | *pending* | *pending* | *pending* |
+
+**What to look for once run**: with `SCALING_MODE=None`, `win_loc`/`win_scale` are fixed at 0/1 by construction, so `corr(win_loc, y[t-1])` will trivially be undefined/zero (no variance) — the only thing that can move is `corr(loc_raw, y[t-1])` itself. If it drops from Run 2's 0.1609, that supports the internal-re-centering hypothesis. **Apply the same verification used to debunk Run 3 and flag Run 2a as unconfirmed**: check the prediction-positive rate against the 53.4% true base rate, and check accuracy by `|pred|` confidence quartile, before trusting any Dir Acc/Sharpe change at face value.
