@@ -163,6 +163,42 @@ Three runs — a data-only pass (calendar `futr_exog` features) and a model-only
 
 **Next step (already in progress as of this note): `max_steps` doubled** (tuning 500→1000, final 1000→2000), same architecture and channel config otherwise. If predictions become more varied and genuinely track the true series (not just a bigger constant nudge), that confirms undertraining was the bottleneck. If it still collapses to a near-constant output even with double the training, that's real evidence of a genuine ceiling — a much better-earned conclusion than assuming it without testing.
 
+| # | Date | Commit | Data features | Config changes | RMSE | MAE | Dir Acc | Cov 80% | Cov 90% | Sharpe | Max DD |
+|---|------|--------|----------------|-----------------|------|-----|---------|---------|---------|--------|--------|
+| 4 | 2026-07-27 | `40268ed` | `hist_exog` = all 20 features (fully multivariate) | Same as Run 3, plus: `max_steps` doubled (tuning 500→1000, final 1000→2000) to test the undertraining hypothesis. `input_size` tuned over {24,60,120,240} → **60** (was 240 in Run 3 — the flat tuning curve shifted which candidate wins, another sign this surface is noisy) | 0.004161 | 0.002356 | 0.4970 | 0.7618 | 0.8615 | 0.0031 | -0.2217 |
+
+**Run 4 — `input_size` tuning (val MAE):**
+
+| input_size | 24 | 60 (selected) | 120 | 240 |
+|---|---|---|---|---|
+| val MAE | 0.543702 | **0.536928** | 0.538877 | 0.538860 |
+
+**Run 4 — diagnostic comparison against Run 3 (same architecture, 2x training steps):**
+
+| | Run 3 (500/1000 steps) | Run 4 (1000/2000 steps) |
+|---|---|---|
+| Fraction of predictions that are "up" | 96.7% | **55.6%** (true base rate: 53.4%) |
+| mean(pred) | positive, clearly biased | **-0.000008** (essentially zero) |
+| std(pred) / std(y) | 0.06 | 0.08 (still tiny, but no longer collapsed to near-constant) |
+| corr(loc_raw, y[t-1]) | 0.0074 | -0.0289 |
+| Dir Acc | 0.5362 (debunked — see above) | **0.4970** |
+| Cov 80% / 90% | 0.7890 / 0.8850 | 0.7618 / 0.8615 (worse) |
+| Sharpe | 0.5254 (debunked — see above) | **0.0031** |
+
+**Run 4 notes (`max_steps` doubled — testing the undertraining hypothesis):**
+- **Part 1 of the hypothesis confirmed: the near-constant "always predict up" collapse was genuinely an undertraining artifact.** With double the steps, the prediction-positive rate dropped from a wildly-biased 96.7% to 55.6% — close to the test set's actual 53.4% up-rate, and `mean(pred)` moved from clearly-positive to essentially zero. This is a clean, well-earned confirmation: Run 3's model hadn't been trained long enough to move past a degenerate "predict positive most of the time" shortcut.
+- **Part 2: fixing that artifact did not reveal hidden skill underneath.** Once the bias is gone, directional accuracy reverts to **0.4970 — at or slightly below pure chance**, and both Sharpe (0.5254→0.0031) and the earlier "improvement" essentially vanish along with it. This directly confirms the debunking analysis from Run 3: that run's impressive-looking Dir Acc and Sharpe were artifacts of the bias, not real signal, and removing the bias exposes there was nothing underneath it.
+- **RMSE/MAE remain completely flat** (0.004159→0.004161, 0.002358→0.002356) — across every single PatchTST run logged in this document (Runs 1–4, spanning point-wise MSE, distributional NLL, channel-weighting fixes, cross-channel attention, and now 2x training budget), MAE has stayed in a narrow 0.00235–0.00254 band. Nothing tried so far has moved this metric meaningfully.
+- **Calibration got worse, not better, with more training** (Cov 80%: 0.7890→0.7618; Cov 90%: 0.8850→0.8615) — this refutes the other half of the undertraining hypothesis. More steps didn't fix calibration; if anything it's now the worst of any post-Run-1 result. The calibration regression from `channel_attention=True` is evidently not simply a training-budget issue.
+- **Bottom line**: this was a well-designed, well-earned test, and its answer is now clear rather than assumed. `max_steps` was a real bottleneck for the specific degenerate collapse, but not for the model's actual forecasting ability or its interval calibration — both look like genuine ceilings of this architecture/data combination at `h=1`, not artifacts of insufficient training. This is now consistent with everything else found across both models in this entire project: one-step-ahead hourly SPY return prediction sits very close to the noise floor, and no optimization attempted so far (data-wise or model-wise, for either DeepAR or PatchTST) has moved point-forecast accuracy or directional accuracy meaningfully past that floor.
+
+### Where this leaves PatchTST optimization
+
+Increasing training budget is now a dead end — ruled out with direct evidence rather than assumed. Remaining untried levers, in rough order of promise:
+1. **Feature curation** (raised earlier, now more clearly motivated): trim redundant/heavily-lagged indicators (`bb_upper/lower/width`, `MACD`, `RSI` are all derived from the same underlying price series and highly collinear with each other) and consider adding features that more directly capture very-recent price dynamics, now that `channel_attention=True` means such changes could actually reach `return_1h`'s forecast.
+2. **Recalibration**: since more training made calibration worse rather than better, a conformal-calibration layer on top of the analytic quantiles (removed after Run 2, since analytic intervals were briefly excellent) may need to come back as a permanent fix rather than a fallback.
+3. **Accept the ceiling**: given the consistency of this finding across both models and every optimization attempted, it may be more productive to shift focus to final DeepAR-vs-PatchTST comparison/synthesis than to continue chasing marginal PatchTST tuning.
+
 **Two concrete next steps, cheapest first:**
 1. **Increase `max_steps`** (e.g. 1000/2000 instead of 500/1000) — cheapest possible test of the "undertrained for the added complexity" hypothesis, no architecture change.
 2. **Reintroduce a conformal recalibration layer** on top of the analytic quantiles (the same technique already used for DeepAR, and for PatchTST's original point-wise run) — this would directly guarantee correct coverage regardless of whether the underlying `scale` parameter is well-calibrated, at the cost of losing the "fully analytic, no post-hoc correction" property Run 2/3 currently have.
