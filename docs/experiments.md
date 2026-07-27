@@ -219,10 +219,29 @@ Each is tested in isolation against Run 2, so any change in `corr(loc_raw, y[t-1
 
 ### Run 2a — last-patch pooling
 
-*Pending execution — code implemented and pushed (commit `9b2f337`), not yet run.*
-
 | # | Date | Commit | Base | Change from Run 2 | RMSE | MAE | Dir Acc | Cov 80% | Cov 90% | Sharpe | Max DD | corr(loc_raw, y[t-1]) |
 |---|------|--------|------|--------------------|------|-----|---------|---------|---------|--------|--------|------------------------|
-| 2a | *pending* | `9b2f337` | Run 2 (`8083e60`) | Pooling: mean-pool across all patches → use only the most recent patch's representation | *pending* | *pending* | *pending* | *pending* | *pending* | *pending* | *pending* | *pending* |
+| 2a | 2026-07-27 | `04af727` | Run 2 (`8083e60`) | Pooling: mean-pool across all patches → use only the most recent patch's representation (`POOLING_MODE='last_patch'`) | 0.004151 | 0.002343 | 0.5342 | 0.8469 | 0.9255 | 0.8638 | -0.1591 | 0.0076 |
 
-**What to look for once run**: does `corr(loc_raw, y[t-1])` move meaningfully from Run 2's 0.1609? If it drops, that supports the recency-dilution hypothesis. Also check RMSE/MAE/Dir Acc/calibration against Run 2's 0.004158/0.002350/0.5152/0.8068/0.9000 — a pooling change that fixes the lag-echo but hurts these would be a mixed result, not a clean win.
+**Run 2a — `input_size` tuning (val MAE):**
+
+| input_size | 24 | 60 | 120 | 240 (selected) |
+|---|---|---|---|---|
+| val MAE | 0.550978 | 0.542312 | 0.542438 | **0.537826** |
+
+**Run 2a — verification diagnostic (same checks that debunked Run 3's gains):**
+
+| | Run 2 | Run 2a | Run 3 (debunked, for comparison) |
+|---|---|---|---|
+| Fraction of predictions "up" | *(not checked)* | **84.97%** | 96.72% |
+| True base rate "up" | 53.42% | 53.42% | 53.42% |
+| Dir Acc | 0.5152 | 0.5342 | 0.5362 |
+| Dir Acc by |pred| quartile (low→high conf.) | *(not checked)* | 0.551, 0.524, 0.517, 0.545 (flat/noisy) | 0.506, 0.566, 0.535, 0.539 (flat/noisy) |
+| std(pred)/std(y) | *(not checked)* | 0.080 | 0.060 |
+
+**Run 2a notes (last-patch pooling — mixed result, not a clean win):**
+- **⚠️ The directional-accuracy and Sharpe gains closely resemble Run 3's debunked pattern, just milder.** The model predicts "up" on 85% of bars (vs. a 53.4% true base rate), and directional accuracy (0.5342) matches the true base rate almost to the decimal — the same signature that turned out to be a positive-bias artifact, not genuine skill, in Run 3. The confidence-quartile check confirms this: accuracy does not climb with prediction confidence (0.551 → 0.524 → 0.517 → 0.545, flat/noisy), exactly as a real signal would not look. **Treat Dir Acc 0.5342 and Sharpe 0.8638 as unconfirmed, likely substantially artifact — not a verified improvement.**
+- **RMSE/MAE improved slightly and genuinely** (0.004158→0.004151, 0.002350→0.002343) — small, but this particular pair of metrics is bias-agnostic (unlike Dir Acc/Sharpe), so this is a real, if modest, point-forecast improvement from the pooling change.
+- **Interval calibration regressed** — and in a new direction: Run 2 was almost exactly calibrated (0.8068/0.9000 vs 0.80/0.90 targets); Run 2a now *over*-covers (0.8469/0.9255). Over-covering is a milder problem than under-covering (conservative rather than overconfident), but it's still a real regression from Run 2's excellent calibration.
+- **`corr(loc_raw, y[t-1])` dropped sharply (0.1609→0.0076), but interpret this cautiously**, per the same caveat that applied to Run 3: `std(pred)/std(y)` is only 0.080 — a near-collapsed, low-variance prediction will show low correlation with almost anything by construction, not necessarily because the recency-dilution hypothesis was confirmed. This metric alone can't distinguish "genuinely fixed" from "collapsed to something blander."
+- **Bottom line**: last-patch pooling gave a small, real MAE/RMSE improvement, but reintroduced a milder version of the same positive-bias artifact seen in Run 3, and made calibration worse. Not a clean win over Run 2 — the honest read is "mixed, and the headline-looking numbers (Dir Acc, Sharpe) shouldn't be trusted without this same verification applied every time." Run 2b (`scaling=None`, testing the internal-instance-normalization hypothesis) is still worth running as the other isolated candidate explanation for Run 2's residual lag-echo.
