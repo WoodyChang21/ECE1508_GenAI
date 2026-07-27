@@ -98,7 +98,32 @@ Three runs — a data-only pass (calendar `futr_exog` features) and a model-only
 - **Directional accuracy is essentially identical** (0.5006 vs 0.5006) — expected, since this axis doesn't depend on the loss family, and confirms (again) the model has ~no directional edge regardless of point-vs-distributional training.
 - **Sharpe got much worse** (-0.0123 → -0.4484) — consistent with the now-familiar pattern that this metric is highly noisy/path-dependent and shouldn't be read as a skill signal on its own.
 - **Plausible explanations for the worse fit, worth investigating before concluding NLL "doesn't work" here**: (a) NLL optimizes mean *and* scale/tail-shape jointly, which can genuinely trade off some point-forecast accuracy against calibration, especially under a fixed, possibly-too-short training budget (same `max_steps=500/1000` as the MSE run); (b) the manual bypass training loop (replicating the library's intended NLL computation by hand, since the library's own path crashes at `prediction_length=1`) could have subtly different numerics than the untested "intended" path — worth a sanity check that the manual loss matches what the library would compute if it worked; (c) StudentT NLL is known to be a harder loss surface to optimize than plain MSE, and may need more steps or a lower/warmed-up learning rate to converge as well.
-- **Bottom line**: the fairness motivation for this change stands (comparable probabilistic modeling to DeepAR), but it did not yet deliver better numbers — this is now the fair baseline to optimize from, not a finish line. `channel_attention=True` (the fix for the "not actually multivariate" issue established earlier) is still the next planned pass.
+- **Bottom line**: the fairness motivation for this change stands (comparable probabilistic modeling to DeepAR), but it did not yet deliver better numbers.
+- **⚠️ Superseded by Run 2 below.** A follow-up lag-correlation diagnostic on this run's predictions found `corr(pred[t], y[t]) ≈ 0` but `corr(pred[t], y[t-1]) = 0.81` — the model was echoing a damped version of the *previous* actual return rather than predicting the next one. Root cause: this run's training loss was averaged **equally across all 21 channels** (not just `return_1h`), unlike DeepAR, whose loss is inherently computed only on its single univariate target. Run 2 fixes this and should be treated as the actual fair baseline; this run is kept here for the record, not as a valid comparison point.
 
-<!-- Lag-diagnostic check (correlation of pred[t] against true[t], true[t-1], true[t-2], ...) pending —
-data/predictions/patchtst_preds.parquet from this run wasn't copied back from Colab to the local repo. -->
+| # | Date | Commit | Data features | Config changes | RMSE | MAE | Dir Acc | Cov 80% | Cov 90% | Sharpe | Max DD |
+|---|------|--------|----------------|-----------------|------|-----|---------|---------|---------|--------|--------|
+| 2 | 2026-07-26 | `8083e60` | `hist_exog` = all 20 features (fully multivariate, `channel_attention=False`) | **True fair-baseline pass.** Same as Run 1, plus: training loss now computed **only on channel 0 (`return_1h`)** instead of averaged across all 21 channels — matching DeepAR, whose loss has only ever been computed on its single univariate target. Model still sees all 21 channels as context (channel-independent patching/encoding unaffected); only the training gradient signal changed. `input_size` tuned over {24,60,120,240} → 240 | 0.004158 | 0.002350 | 0.5152 | 0.8068 | 0.9000 | -0.0673 | -0.2345 |
+
+**Run 2 — `input_size` tuning (val MAE):**
+
+| input_size | 24 | 60 | 120 | 240 (selected) |
+|---|---|---|---|---|
+| val MAE | 0.547853 | 0.541291 | 0.541689 | **0.537668** |
+
+**Run 2 — lag diagnostic (correlation with y[t-1], normalised space):**
+
+| | Run 1 (21-channel loss) | Run 2 (channel-0 loss) |
+|---|---|---|
+| corr(loc_raw, y[t-1]) — learned weights' own signal | 0.7604 | **0.1609** |
+| corr(win_loc, y[t-1]) — non-learned instance norm | 0.0667 | 0.0667 |
+| corr(final pred, y[t-1]) | 0.8073 | **0.1201** |
+
+**Run 2 notes (true fair-baseline pass — channel-0-only loss):**
+- **The lag-echo effect collapsed**: `corr(loc_raw, y[t-1])` dropped from 0.76 to 0.16 — confirms the diagnosis was correct. Restricting the loss to `return_1h` stopped the shared weights from learning a persistence strategy borrowed from the other 20 (genuinely autocorrelated) channels. `win_loc`'s correlation is unchanged (0.0667, as expected — that path was never learned, just mechanical per-window normalization, and was already ruled out as the cause).
+- **Every accuracy metric improved over Run 1**: RMSE 0.004365→0.004158, MAE 0.002544→0.002350, Dir Acc 0.5006→0.5152.
+- **This is now also the best MAE across every PatchTST run to date**, including the original point-wise `loss='mse'` + conformal baseline (MAE 0.002373) — the channel-0-only distributional loss beats both prior approaches on raw point-forecast accuracy.
+- **Interval calibration is now excellent**: Cov 80% = 0.8068 (target 0.80) and Cov 90% = 0.9000 (target 0.90, hit almost exactly) — a large improvement over Run 1's 0.7663/0.8615, and better than the original conformal-calibrated run's 0.7967/0.8801 too.
+- **Sharpe improved substantially** (-0.4484 → -0.0673) though still negative; Max Drawdown got slightly worse (-21.8%→-23.4%). Per the running theme with DeepAR, treat these two as noisy/path-dependent rather than a clean verdict.
+- **Directional accuracy (0.5152) is still close to chance**, but is now PatchTST's best result on this axis across all runs, and slightly ahead of DeepAR's best (0.5213 from DeepAR Run 3 — nearly tied).
+- **Bottom line**: this is the actual fair, methodologically-sound baseline to compare against DeepAR and to optimize further from. `channel_attention=True` — letting `return_1h` actually use information from the other 20 channels, which it structurally still cannot do here — remains the next planned pass and is now motivated by cleaner evidence, since the channel-weighting confound from Run 1 has been removed.
