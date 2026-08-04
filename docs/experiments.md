@@ -18,15 +18,11 @@ How to add an entry after a run:
 
 | # | Date | Commit | Data features | Config changes | RMSE | MAE | Dir Acc | Cov 80% | Cov 90% | Sharpe | Max DD |
 |---|------|--------|----------------|-----------------|------|-----|---------|---------|---------|--------|--------|
-| 1 | 2026-07-24 | `f21d62e` | `futr_exog = [is_first_bar]` (1 feature) | Baseline: `input_size` tuned over {24,60,120,240} → 120; `lstm_hidden_size=128`, `lstm_n_layers=2`, `trajectory_samples=100/200`, `StudentT` loss, `scaler_type=standard` | 0.004169 | 0.002354 | 0.5103 | 0.7898 | 0.8854 | -0.4188 | -0.3525 |
+| 1 | 2026-08-04 | [`4369142`](https://github.com/WoodyChang21/ECE1508_GenAI/commit/4369142) | `futr_exog = [is_first_bar]` (1 feature) | Baseline: `input_size` tuned over {24,60,120,240} → 120; `lstm_hidden_size=128`, `lstm_n_layers=2`, `trajectory_samples=100/200`, `StudentT` loss, `scaler_type=standard` | 0.004164 | 0.002351 | 0.5156 | 0.8019 | 0.8991 | -0.2255 | -0.3020 |
 
-**Run 1 — `input_size` tuning (val MAE):**
+<sup>`input_size` val MAE: 24→0.002169, 60→0.002155, **120→0.002146 (selected)**, 240→0.002148 — flat across candidates, not a meaningful lever.</sup>
 
-| input_size | 24 | 60 | 120 (selected) | 240 |
-|---|---|---|---|---|
-| val MAE | 0.002169 | 0.002155 | **0.002146** | 0.002150 |
-
-**Run 1 notes:** Baseline. `input_size` tuning was flat across candidates (val MAE range 0.002146–0.002169, ~1% relative) — not a meaningful lever. Directional accuracy barely above chance and negative Sharpe suggest the model is close to predicting the unconditional mean. 90% interval undercovers (0.885 vs 0.90 target).
+Baseline. Dir Acc near chance, negative Sharpe — model close to predicting the unconditional mean.
 
 | # | Date | Commit | Data features | Config changes | RMSE | MAE | Dir Acc | Cov 80% | Cov 90% | Sharpe | Max DD |
 |---|------|--------|----------------|-----------------|------|-----|---------|---------|---------|--------|--------|
