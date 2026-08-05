@@ -1,0 +1,29 @@
+seed: 42
+device: auto  # auto | cpu | mps
+data_path: steven/data/spy_ohlcv_1h.parquet
+
+model:
+  hidden: 32
+  ctx_dim: 64
+  z_dim: 16
+  decoder_hidden: 128
+
+loss:
+  w_price: 1.0
+  w_vol: 0.5
+  kl_anneal_epochs: 5
+  free_bits: 0.05
+
+train:
+  max_epochs: 30
+  train_windows_per_epoch: 20000
+  windows_per_eval_set: 3000
+  batch_size: 64
+  lr: 0.0003
+  weight_decay: 0.0001
+
+inference:
+  num_samples: 5
+
+output:
+  checkpoint_path: steven/outputs/cvae_checkpoint.pt

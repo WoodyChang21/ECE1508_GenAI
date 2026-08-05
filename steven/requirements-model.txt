@@ -1,0 +1,3 @@
+torch>=2.13.0
+mplfinance>=0.12.10b0
+pyyaml>=6.0.0

@@ -1,0 +1,25 @@
+seed: 42
+device: auto  # auto | cpu | mps
+data_path: steven/data/spy_ohlcv_1h.parquet
+
+model:
+  d_model: 64
+  nhead: 4
+  num_layers: 3
+  dim_feedforward: 128
+  dropout: 0.1
+
+loss:
+  w_price: 1.0
+  w_vol: 0.5
+
+train:
+  max_epochs: 20
+  train_windows_per_epoch: 20000
+  windows_per_eval_set: 3000
+  batch_size: 64
+  lr: 0.0003
+  weight_decay: 0.0001
+
+output:
+  checkpoint_path: steven/outputs/patchtst_checkpoint.pt
