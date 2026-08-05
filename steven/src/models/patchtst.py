@@ -6,9 +6,8 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from src.data_pipeline import MAX_CONTEXT, N_FEATURE_CHANNELS, N_PATCHES, PATCH_LEN
+from src.data_pipeline import MAX_CONTEXT, MAX_LOG_RETURN, N_FEATURE_CHANNELS, N_PATCHES, PATCH_LEN
 
 
 class PatchTST(nn.Module):
@@ -53,10 +52,12 @@ class PatchTST(nn.Module):
         raw = self.head(x)
 
         price_raw = raw[:, :12].reshape(B, 3, 4)
-        open_ret = price_raw[..., 0]
-        body_ret = price_raw[..., 1]
-        upper_wick = F.softplus(price_raw[..., 2])
-        lower_wick = F.softplus(price_raw[..., 3])
+        # Bounded to +-MAX_LOG_RETURN (open_ret/body_ret) or [0, MAX_LOG_RETURN] (wicks)
+        # so an undertrained/unstable head can't blow up into unrealistic price moves.
+        open_ret = MAX_LOG_RETURN * torch.tanh(price_raw[..., 0])
+        body_ret = MAX_LOG_RETURN * torch.tanh(price_raw[..., 1])
+        upper_wick = MAX_LOG_RETURN * torch.sigmoid(price_raw[..., 2])
+        lower_wick = MAX_LOG_RETURN * torch.sigmoid(price_raw[..., 3])
         price = torch.stack([open_ret, body_ret, upper_wick, lower_wick], dim=-1)
 
         volume = raw[:, 12:15]

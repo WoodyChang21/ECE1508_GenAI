@@ -15,6 +15,8 @@ import logging
 import sys
 from pathlib import Path
 
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
@@ -25,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import mplfinance as mpf
 
 from src.data_pipeline import (
+    HORIZON,
     WindowDataset,
     WindowSampler,
     build_dataset,
@@ -52,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cvae-checkpoint", type=str, default="steven/outputs/cvae_checkpoint.pt")
     p.add_argument("--n-test-windows", type=int, default=3000)
     p.add_argument("--num-samples", type=int, default=5)
-    p.add_argument("--num-plot-windows-per-bucket", type=int, default=2)
+    p.add_argument("--num-plot-samples", type=int, default=5)
     p.add_argument("--device", type=str, default="auto")
     p.add_argument("--metrics-out", type=str, default="steven/outputs/metrics.json")
     p.add_argument("--plots-dir", type=str, default="steven/outputs/sample_plots")
@@ -290,62 +293,119 @@ def run_backtest(true_y: np.ndarray, pt_y: np.ndarray, cvae_y: np.ndarray, close
     }
 
 
-def make_plots(df, feat, opens, closes, stats, patchtst, cvae, test_pairs, args, device):
-    from src.data_pipeline import build_window
+def draw_horizon_box(ax, n_shown: int) -> None:
+    """Red box around the last HORIZON candles -- the region being generated/predicted."""
+    x0, x1 = n_shown - HORIZON - 0.5, n_shown - 0.5
+    y0, y1 = ax.get_ylim()
+    ax.add_patch(
+        mpatches.Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, edgecolor="red", linewidth=1.8, zorder=6)
+    )
+
+
+def mark_trade(ax, n_shown: int, buy_price: float, sell_price: float) -> None:
+    """Buy = dashed line at close_0 (the last known candle's close). Sell = a dot at the
+    expected exit price (mean of the 3 horizon bars' open+close), centered in the box."""
+    ax.axhline(buy_price, color="tab:blue", linestyle="--", linewidth=1, zorder=6)
+    ax.text(-0.6, buy_price, "buy", color="tab:blue", fontsize=7, va="bottom", ha="left", zorder=6)
+    sell_x = n_shown - HORIZON / 2 - 0.5
+    ax.scatter([sell_x], [sell_price], color="purple", edgecolors="black", s=45, zorder=7)
+    ax.text(sell_x, sell_price, "  sell", color="purple", fontsize=7, va="center", ha="left", zorder=7)
+
+
+def trade_table_text(ohlc: np.ndarray, buy_price: float) -> tuple[str, float]:
+    """ohlc: (3,4) [open,high,low,close] for the 3 horizon bars. Returns the annotation
+    text and the expected sell price (mean of the 6 open/close values -- same definition
+    used by exit_price_from_components in the backtest)."""
+    sell_price = float(ohlc[:, [0, 3]].mean())
+    lines = [
+        f"C1  O={ohlc[0,0]:.2f}  C={ohlc[0,3]:.2f}    "
+        f"C2  O={ohlc[1,0]:.2f}  C={ohlc[1,3]:.2f}    "
+        f"C3  O={ohlc[2,0]:.2f}  C={ohlc[2,3]:.2f}",
+        f"Buy (close of last known candle) = {buy_price:.2f}      "
+        f"Expected sell (avg of the 6 open/close) = {sell_price:.2f}",
+    ]
+    return "\n".join(lines), sell_price
+
+
+def render_panel(fig, gs_chart, gs_text, sub_df: pd.DataFrame, buy_price: float, title: str) -> None:
+    ax = fig.add_subplot(gs_chart)
+    mpf.plot(sub_df, type="candle", ax=ax, style="yahoo", volume=False)
+    ax.set_title(title, fontsize=10)
+    ax.tick_params(axis="x", labelrotation=30, labelsize=7)
+    draw_horizon_box(ax, len(sub_df))
+
+    ohlc = sub_df.iloc[-HORIZON:][["open", "high", "low", "close"]].to_numpy()
+    text, sell_price = trade_table_text(ohlc, buy_price)
+    mark_trade(ax, len(sub_df), buy_price, sell_price)
+
+    ax_txt = fig.add_subplot(gs_text)
+    ax_txt.axis("off")
+    ax_txt.text(0.0, 1.0, text, transform=ax_txt.transAxes, ha="left", va="top", fontsize=7.5, family="monospace")
+
+
+def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, device):
+    """Draws num_plot_samples fresh random (start_idx, ctx_bars) windows -- NOT the
+    fixed/seeded eval test_pairs -- so each run's sample plots differ. Each figure has
+    3 candlestick panels: ground truth (left), PatchTST's generated horizon candles
+    (top right), CVAE's generated horizon candles from one sampled draw (bottom right).
+    Each panel gets a red box around the generated/predicted 3 candles, a buy-price line
+    (close of the last known candle) and a sell-price dot (expected exit price), plus a
+    per-candle open/close + buy/sell text table underneath."""
+    from src.data_pipeline import CONTEXT_LENGTHS, build_window
 
     out_dir = Path(args.plots_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    by_bucket = {b: [] for b in BUCKETS}
-    for start_idx, ctx_bars in test_pairs:
-        by_bucket[context_bucket(ctx_bars)].append((start_idx, ctx_bars))
+    # Fresh entropy each call -- intentionally independent of the fixed eval seed, since
+    # these are illustrative samples, not part of the reproducible metrics.
+    rng = np.random.default_rng()
+    ohlc_cols = ["open", "high", "low", "close"]
 
     plotted = 0
-    for bucket in BUCKETS:
-        chosen = by_bucket[bucket][: args.num_plot_windows_per_bucket]
-        for start_idx, ctx_bars in chosen:
-            w = build_window(feat, opens, closes, start_idx, ctx_bars)
-            masked_tensor = torch.from_numpy(w["masked_tensor"]).unsqueeze(0).to(device)
-            context_np, patch_pad_np = to_patchtst_input(w["masked_tensor"])
-            context_t = torch.from_numpy(context_np).unsqueeze(0).to(device)
-            patch_pad_t = torch.from_numpy(patch_pad_np).unsqueeze(0).to(device)
+    for i in range(args.num_plot_samples):
+        ctx_bars = int(rng.choice(CONTEXT_LENGTHS))
+        starts = test_sampler.valid_starts(ctx_bars)
+        if len(starts) == 0:
+            logger.warning("no valid starts for ctx_bars=%d, skipping sample %d", ctx_bars, i)
+            continue
+        start_idx = int(rng.choice(starts))
 
-            with torch.no_grad():
-                pt_price, _ = patchtst(context_t, patch_pad_t)
-                cvae_price, _ = cvae.sample(masked_tensor, k=args.num_samples)
+        w = build_window(feat, opens, closes, start_idx, ctx_bars)
+        masked_tensor = torch.from_numpy(w["masked_tensor"]).unsqueeze(0).to(device)
+        context_np, patch_pad_np = to_patchtst_input(w["masked_tensor"])
+        context_t = torch.from_numpy(context_np).unsqueeze(0).to(device)
+        patch_pad_t = torch.from_numpy(patch_pad_np).unsqueeze(0).to(device)
 
-            pt_ohlc = reconstruct_prices(pt_price[0].cpu().numpy(), w["close_0"])  # (3,4)
-            cvae_ohlc = reconstruct_prices(cvae_price[:, 0].cpu().numpy(), w["close_0"])  # (K,3,4)
+        with torch.no_grad():
+            pt_price, _ = patchtst(context_t, patch_pad_t)
+            cvae_price, _ = cvae.sample(masked_tensor, k=1)  # one generated draw, not the mean
 
-            ctx_tail = min(ctx_bars, 10)
-            hz_start = start_idx + ctx_bars
-            plot_rows = df.iloc[hz_start - ctx_tail : hz_start + 3]
-            true_df = plot_rows.set_index("datetime")[["open", "high", "low", "close", "volume"]]
+        pt_ohlc = reconstruct_prices(pt_price[0].cpu().numpy(), w["close_0"])  # (3,4)
+        cvae_ohlc = reconstruct_prices(cvae_price[0, 0].cpu().numpy(), w["close_0"])  # (3,4)
+        buy_price = float(w["close_0"])
 
-            horizon_idx = true_df.index[-3:]
-            pt_close_line = pd.Series(np.nan, index=true_df.index)
-            pt_close_line.loc[horizon_idx] = pt_ohlc[:, 3]
+        ctx_tail = min(ctx_bars, 20)
+        hz_start = start_idx + ctx_bars
+        plot_rows = df.iloc[hz_start - ctx_tail : hz_start + 3]
+        true_df = plot_rows.set_index("datetime")[["open", "high", "low", "close", "volume"]]
 
-            addplots = [mpf.make_addplot(pt_close_line, type="line", color="blue", width=2, marker="o")]
-            for k in range(cvae_ohlc.shape[0]):
-                line = pd.Series(np.nan, index=true_df.index)
-                line.loc[horizon_idx] = cvae_ohlc[k, :, 3]
-                addplots.append(
-                    mpf.make_addplot(line, type="line", color="orange", width=1, alpha=0.6)
-                )
+        pt_df = true_df.copy()
+        pt_df.loc[pt_df.index[-3:], ohlc_cols] = pt_ohlc
+        cvae_df = true_df.copy()
+        cvae_df.loc[cvae_df.index[-3:], ohlc_cols] = cvae_ohlc
 
-            title = f"{bucket} ctx (ctx_bars={ctx_bars}) - true vs PatchTST(blue) vs CVAE x{args.num_samples}(orange)"
-            out_path = out_dir / f"{bucket}_start{start_idx}_ctx{ctx_bars}.png"
-            mpf.plot(
-                true_df,
-                type="candle",
-                addplot=addplots,
-                style="yahoo",
-                title=title,
-                savefig=str(out_path),
-                volume=False,
-            )
-            plotted += 1
+        fig = plt.figure(figsize=(16, 8))
+        outer = fig.add_gridspec(6, 2, width_ratios=[1, 1], hspace=0.7, wspace=0.25)
+
+        render_panel(fig, outer[0:4, 0], outer[4:6, 0], true_df, buy_price, "Ground truth")
+        render_panel(fig, outer[0:2, 1], outer[2, 1], pt_df, buy_price, "PatchTST generated")
+        render_panel(fig, outer[3:5, 1], outer[5, 1], cvae_df, buy_price, "CVAE generated (1 draw)")
+
+        fig.suptitle(f"{context_bucket(ctx_bars)} ctx (ctx_bars={ctx_bars}, start_idx={start_idx})")
+        out_path = out_dir / f"sample{i}_start{start_idx}_ctx{ctx_bars}.png"
+        fig.savefig(out_path, bbox_inches="tight")
+        plt.close(fig)
+        plotted += 1
     logger.info("wrote %d sample plots to %s", plotted, out_dir)
 
 
@@ -410,7 +470,7 @@ def main() -> None:
     logger.info("wrote metrics to %s", args.metrics_out)
     logger.info("overall: %s", json.dumps(results["overall"], indent=2))
 
-    make_plots(df, feat, opens, closes, stats, patchtst, cvae, test_pairs, args, device)
+    make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, device)
 
 
 if __name__ == "__main__":

@@ -38,6 +38,13 @@ PRICE_VOL_IDX = [0, 1, 2, 3, 4]  # zeroed at horizon positions in the masked ten
 CONTEXT_LENGTHS = [14, 21, 28, 35, 42, 49, 56, 63, 70]  # 2..10 trading days, step 7 (1 day = 7 bars)
 MAX_CONTEXT = 70
 HORIZON = 3
+
+# Hard cap on predicted per-bar log-return components (open_ret, body_ret, wicks).
+# Training data's most extreme single hourly bar ever seen is open_ret=0.116 (p99.9 is
+# ~0.02-0.03); 0.15 is generous headroom above that, chosen to make runaway predictions
+# (e.g. an undertrained head outputting |x| ~ 1-2, which exp() turns into 3-10x price
+# moves) architecturally impossible rather than relying on training to avoid them.
+MAX_LOG_RETURN = 0.15
 TOTAL_LEN = MAX_CONTEXT + HORIZON  # 73
 PATCH_LEN = 7
 N_PATCHES = MAX_CONTEXT // PATCH_LEN  # 10
@@ -324,7 +331,7 @@ def to_patchtst_input(masked_tensor: np.ndarray) -> tuple[np.ndarray, np.ndarray
 
 def reconstruct_prices(components: np.ndarray, close_0) -> np.ndarray:
     """components: (..., 3, 4) [open_ret, body_ret, upper_wick, lower_wick] per horizon
-    bar (wick terms already non-negative, e.g. via softplus for model predictions).
+    bar (wick terms already non-negative for model predictions, see MAX_LOG_RETURN).
     close_0: scalar, or (...) matching components' leading batch dims.
     Returns (..., 3, 4) absolute prices [open, high, low, close]."""
     open_ret, body_ret, upper_wick, lower_wick = (components[..., i] for i in range(4))
