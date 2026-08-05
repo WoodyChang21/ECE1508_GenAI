@@ -54,6 +54,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--metrics-out", type=str, default="steven/outputs/metrics.json")
     p.add_argument("--plots-dir", type=str, default="steven/outputs/sample_plots")
     p.add_argument("--seed", type=int, default=123)
+    p.add_argument("--batch-size", type=int, default=256)
+    # default 0: benchmarked in steven/configs/patchtst.yaml -- DataLoader multiprocessing
+    # is slower here, not faster, since build_window() is cheap numpy per sample.
+    p.add_argument("--num-workers", type=int, default=0)
     return p.parse_args()
 
 
@@ -259,7 +263,14 @@ def main() -> None:
     logger.info("evaluating on %d fixed test windows", len(test_pairs))
 
     test_ds = WindowDataset(feat, opens, closes, test_pairs)
-    test_loader = DataLoader(test_ds, batch_size=128, shuffle=False, collate_fn=collate)
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=collate,
+        num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
+    )
 
     patchtst = PatchTST(**pt_cfg["model"]).to(device)
     patchtst.load_state_dict(pt_ckpt["model_state"])

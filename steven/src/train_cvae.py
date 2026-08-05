@@ -110,10 +110,18 @@ def main() -> None:
     train_sampler = WindowSampler(*bounds["train"])
     val_sampler = WindowSampler(*bounds["val"])
 
+    # train_ds is rebuilt fresh every epoch (new sampled windows), so no persistent_workers.
+    loader_kwargs = {
+        "num_workers": cfg["train"].get("num_workers", 0),
+        "pin_memory": cfg["train"].get("pin_memory", False),
+    }
+
     val_rng = np.random.default_rng(cfg["seed"])
     val_pairs = val_sampler.draw(cfg["train"]["windows_per_eval_set"], val_rng)
     val_ds = WindowDataset(feat, opens, closes, val_pairs)
-    val_loader = DataLoader(val_ds, batch_size=cfg["train"]["batch_size"], shuffle=False, collate_fn=collate)
+    val_loader = DataLoader(
+        val_ds, batch_size=cfg["train"]["batch_size"], shuffle=False, collate_fn=collate, **loader_kwargs
+    )
 
     model = CVAEInpainting(**cfg["model"]).to(device)
     optimizer = torch.optim.Adam(
@@ -135,7 +143,7 @@ def main() -> None:
         train_pairs = train_sampler.draw(cfg["train"]["train_windows_per_epoch"], train_rng)
         train_ds = WindowDataset(feat, opens, closes, train_pairs)
         train_loader = DataLoader(
-            train_ds, batch_size=cfg["train"]["batch_size"], shuffle=True, collate_fn=collate
+            train_ds, batch_size=cfg["train"]["batch_size"], shuffle=True, collate_fn=collate, **loader_kwargs
         )
 
         train_metrics = run_epoch(model, train_loader, optimizer, cfg["loss"], beta, device, train=True)

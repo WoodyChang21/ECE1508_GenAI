@@ -1,5 +1,5 @@
 seed: 42
-device: auto  # auto | cpu | mps
+device: auto  # auto | cpu | mps | cuda
 data_path: steven/data/spy_ohlcv_1h.parquet
 
 model:
@@ -18,9 +18,12 @@ train:
   max_epochs: 30
   train_windows_per_epoch: 20000
   windows_per_eval_set: 3000
-  batch_size: 64
-  lr: 0.0003
+  # see patchtst.yaml's train: comment -- same A100 rationale (and num_workers=0 finding) applies here.
+  batch_size: 512
+  lr: 0.0006
   weight_decay: 0.0001
+  num_workers: 0
+  pin_memory: true
 
 inference:
   num_samples: 5

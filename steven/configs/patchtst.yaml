@@ -1,5 +1,5 @@
 seed: 42
-device: auto  # auto | cpu | mps
+device: auto  # auto | cpu | mps | cuda
 data_path: steven/data/spy_ohlcv_1h.parquet
 
 model:
@@ -17,9 +17,16 @@ train:
   max_epochs: 20
   train_windows_per_epoch: 20000
   windows_per_eval_set: 3000
-  batch_size: 64
-  lr: 0.0003
+  # batch_size/lr bumped for an A100 -- window tensors are tiny (73x9), plenty of headroom.
+  # num_workers stays 0: benchmarked locally, and DataLoader multiprocessing is *slower*
+  # here (0.6s/epoch at num_workers=0 vs 33s/epoch at num_workers=4, same window count) --
+  # build_window() is a handful of cheap numpy ops per sample, so worker spawn/IPC
+  # overhead (paid every epoch, since train_ds is rebuilt fresh each epoch) dominates.
+  batch_size: 512
+  lr: 0.0006          # modest bump for the 8x batch size increase (Adam, not full linear scaling)
   weight_decay: 0.0001
+  num_workers: 0
+  pin_memory: true    # still worth it for the host->device copy, independent of num_workers
 
 output:
   checkpoint_path: steven/outputs/patchtst_checkpoint.pt
