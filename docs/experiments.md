@@ -58,11 +58,11 @@ RMSE/MAE are flat across all three (~0.0041–0.0042 / ~0.00235–0.00237) — n
 
 | # | Date | Commit | Data features | Config changes | RMSE | MAE | Dir Acc | Cov 80% | Cov 90% | Sharpe | Max DD |
 |---|------|--------|----------------|-----------------|------|-----|---------|---------|---------|--------|--------|
-| 2 | 2026-08-05 | [`2d46969`](https://github.com/WoodyChang21/ECE1508_GenAI/commit/2d46969) | Same as Run 1 (21 channels, `channel_attention=False`) | **True fair-baseline.** Training loss now computed only on channel 0 (`return_1h`), matching DeepAR's univariate loss. `input_size` tuned over {24,60,120,240} → 240 | 0.004178 | 0.002382 | 0.4982 | 0.8177 | 0.9097 | -0.0713 | -0.2278 |
+| 2 | 2026-08-05 | [`47cfca1`](https://github.com/WoodyChang21/ECE1508_GenAI/commit/47cfca1) | Same as Run 1 (21 channels, `channel_attention=False`) | **True fair-baseline**, plus a config fix: `PatchTSTConfig`'s real param is `patch_stride`, not `stride` — the original code's `stride=stride` was silently absorbed as an unused kwarg (HF configs don't error on unrecognized kwargs), so every prior run likely used the library's default patch stride, not the intended one. Training loss computed only on channel 0 (`return_1h`), matching DeepAR. `input_size` tuned over {24,60,120,240} → 240 | 0.004161 | 0.002359 | 0.4966 | 0.7655 | 0.8607 | -0.6301 | -0.3090 |
 
-<sup>`input_size` val MAE: 24→0.549319, 60→0.542473, 120→0.540002, **240→0.538099 (selected)**.</sup>
+<sup>`input_size` val MAE: 24→0.550806, 60→0.540597, 120→0.539879, **240→0.539000 (selected)**.</sup>
 
-**Lag diagnostic** (corr with y[t-1]): `loc_raw` (learned) 0.7604→**-0.0631** (was 0.16 pre-rerun) — the Run 1 lag-echo is fixed; `win_loc` (non-learned, deterministic) stayed exactly 0.0667 both times, a good sanity check. Every accuracy metric improved over Run 1; calibration is close to nominal (0.818/0.910 vs 0.80/0.90 targets).
+**Lag diagnostic** (corr with y[t-1]): `loc_raw` (learned) -0.0205, `win_loc` (non-learned, deterministic) 0.0667 — lag-echo stays fixed. RMSE/MAE/Dir Acc are within this project's established rerun-noise band vs. the pre-fix version; coverage and Sharpe/Max DD moved more, but a single comparison can't isolate whether `patch_stride` specifically caused that — open question, not a confirmed effect.
 
 **⚠️ Structural caveat that still applies**: with `channel_attention=False` + channel-0-only loss, the other 20 channels are computed but discarded — zero gradient, zero information reaching `return_1h`'s forecast. This run is mathematically equivalent to training on `return_1h` alone. "Fair baseline" means the *training objective* matches DeepAR's, not that PatchTST's multivariate premise was tested — that starts at Run 3 (`channel_attention=True`).
 
