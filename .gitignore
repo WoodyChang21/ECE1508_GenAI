@@ -219,3 +219,5 @@ __marimo__/
 
 # Project data — raw downloads excluded; processed outputs committed
 /data/raw/
+/data/predictions/*.parquet
+/data/predictions/*.pt

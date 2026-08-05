@@ -1,6 +1,6 @@
-# ECE1508 GenAI — Intraday SPY Forecasting: DeepAR vs PatchTST
+# ECE1508 GenAI — Intraday SPY Forecasting with Mamba
 
-This project compares two deep learning forecasting paradigms for intraday financial prediction using hourly SPY (S&P 500 ETF) data. The benchmark model is **DeepAR** (autoregressive probabilistic forecasting) and the primary model is **PatchTST** (Transformer-based time-series forecasting).
+This project forecasts one-step-ahead intraday SPY (S&P 500 ETF) returns with **Mamba**, an attention-free selective state-space model. Each hourly row is projected from the target plus 20 historical market features into a continuous embedding; causal Mamba blocks process the lookback window and the final hidden state predicts the next return.
 
 ---
 
@@ -28,6 +28,11 @@ ECE1508_GenAI/
 │       ├── 01_collect_raw.py    # Stage 1: Download raw JSON from FMP
 │       ├── 02_process.py        # Stage 2: Clean, merge, compute features
 │       └── 03_split.py          # Stage 3: Create train/val/test splits
+│   └── models/
+│       ├── mamba_data.py        # Leakage-safe scaling and causal windows
+│       ├── mamba_model.py       # Continuous-input Mamba forecaster
+│       ├── metrics.py           # Forecast and sign-strategy metrics
+│       └── train_mamba.py       # Tune, train, evaluate, save predictions
 ├── tests/
 │   └── data/
 │       ├── conftest.py
@@ -38,6 +43,7 @@ ECE1508_GenAI/
 │   └── superpowers/plans/
 │       └── 2026-06-26-data-collection-pipeline.md
 ├── requirements-data.txt
+├── requirements-model.txt
 └── .env                         # FMP_API_KEY — gitignored
 ```
 
@@ -49,7 +55,7 @@ ECE1508_GenAI/
 |--------|---------|
 | `main` | Project root |
 | `Data` | Data collection and preprocessing pipeline (this branch) |
-| `Model` | DeepAR and PatchTST model implementations |
+| `Model` | Historical DeepAR and PatchTST notebook experiments |
 
 ---
 
@@ -111,7 +117,7 @@ Creates a **walk-forward** train/val/test split. No shuffling — future data ne
 | Test | 2024-01-02 → 2025-05-30 | 2,469 | Final held-out evaluation — never touched during development |
 | **Total** | | **25,241** | Exact match with `features.parquet` |
 
-The validation set (2023) is used exclusively for selecting the input lookback window and forecast horizon — these are treated as hyperparameters, not fixed values. Candidates are 24h, 60h, 120h, and 240h lookback windows.
+The validation set (2023) is used exclusively for selecting the Mamba input lookback window and calibrating prediction intervals. Candidates are 24h, 60h, 120h, and 240h lookback windows.
 
 ---
 
@@ -198,7 +204,7 @@ This is intentional: overnight gaps are a real market phenomenon and carry infor
 The FMP stable API does not carry `^VIX` hourly data before 2023. VIXY (ProShares VIX Short-Term Futures ETF) is used as a proxy. VIXY tracks VIX futures (not the VIX spot index) and decays structurally over time due to negative roll yield. The raw close is log-transformed in `vix_log` to reduce scale differences; `vix_change_1h` is used for directional information.
 
 ### Lookback Window is a Hyperparameter
-The input context length for both DeepAR and PatchTST is **not fixed**. Candidate windows of 24h, 60h, 120h, and 240h will be evaluated on the validation set. The dataset is sized to support all of these without excessive warm-up data loss.
+Mamba's input context length is **not fixed**. Candidate windows of 24h, 60h, 120h, and 240h are evaluated on the validation set. The dataset is sized to support all of these without excessive warm-up data loss.
 
 ### Data Not Committed to Git
 All files under `data/` are gitignored. To reproduce the dataset from scratch:
@@ -241,11 +247,34 @@ python scripts/data/03_split.py
 
 Each stage is independent. If interrupted, Stage 1 skips already-downloaded files. Stages 2 and 3 overwrite their outputs.
 
+## Train the Mamba Forecaster
+
+The model consumes the existing Parquet splits, so raw-data collection is not required when those files are already present.
+
+```bash
+pip install -r requirements-model.txt
+python scripts/models/train_mamba.py
+```
+
+The default run tunes lookbacks `[24, 60, 120, 240]` on validation MAE, retrains the selected configuration on train+validation data, evaluates the held-out test set, and writes `data/predictions/mamba_preds.parquet`. Scaling is fitted on training data during tuning and on train+validation data only for final training. The test target is never used for fitting or interval calibration.
+
+The output follows the existing comparison schema: `datetime`, `y`, `pred`, 80% and 90% interval bounds, and `model`. Intervals are formed from validation residual quantiles.
+
+For a quick CPU integration check rather than a meaningful experiment:
+
+```bash
+python scripts/models/train_mamba.py --lookbacks 24 --epochs 1 \
+  --d-model 16 --layers 1 --limit-train 256 --limit-val 64 \
+  --limit-test 64 --output data/predictions/mamba_smoke.parquet
+```
+
+The full default search is intended for a GPU. Hugging Face Transformers provides a slower sequential Mamba fallback when optimized kernels are unavailable, so CPU execution remains supported but can take substantially longer.
+
 ### Run tests
 
 ```bash
 pytest tests/ -v
-# Expected: 20 passed (6 + 9 + 5)
+# Expected: 29 passed
 ```
 
 ---
