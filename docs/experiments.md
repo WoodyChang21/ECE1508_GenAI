@@ -76,55 +76,15 @@ RMSE/MAE are flat across all three (~0.0041–0.0042 / ~0.00235–0.00237) — n
 
 **⚠️ Debunked — Dir Acc/Sharpe are a bias artifact, not skill.** Model predicts "up" on 92.7% of test bars (true base rate 53.4%); overall Dir Acc (0.5322) is only ~0.1pp above that trivial baseline; `std(pred)/std(y)` ≈ 0.05 (near-collapsed); accuracy-by-confidence-quartile is flat/noisy (0.503/0.554/0.535/0.536), not monotonic as real skill would show. RMSE/MAE unchanged from Run 2; calibration slightly regressed. **Kept anyway for a structural reason**: with Run 2's channel-0-only loss, `channel_attention=False` means the other 20 channels get zero gradient — `channel_attention=True` is the only way they can matter at all, making this a required step to even test "do covariates help," independent of whether it paid off yet.
 
-### Biggest remaining problem, and the next optimization to try
-
-**Two candidate explanations are now on the table for why this run underdelivered, and they point to different next steps:**
-1. **Undertraining**: `channel_attention=True` roughly doubles the attention computation per layer with no increase in training budget (`max_steps` was still 500/1000, same as every prior run) or capacity (`d_model=128`, `num_hidden_layers=3` unchanged). This could explain both the calibration regression *and* the collapse to a near-constant output (a "safe," low-loss default a model falls back on when it hasn't had enough training to learn something better).
-2. **Genuine ceiling**: consistent with every other result in this project (DeepAR's `loc` near zero, near-chance directional accuracy everywhere), it's also possible `return_1h` genuinely has too little one-step-ahead signal for more training to unlock much more.
-
-**Next step (already in progress as of this note): `max_steps` doubled** (tuning 500→1000, final 1000→2000), same architecture and channel config otherwise. If predictions become more varied and genuinely track the true series (not just a bigger constant nudge), that confirms undertraining was the bottleneck. If it still collapses to a near-constant output even with double the training, that's real evidence of a genuine ceiling — a much better-earned conclusion than assuming it without testing.
-
 | # | Date | Commit | Data features | Config changes | RMSE | MAE | Dir Acc | Cov 80% | Cov 90% | Sharpe | Max DD |
 |---|------|--------|----------------|-----------------|------|-----|---------|---------|---------|--------|--------|
-| 4 | 2026-07-27 | `40268ed` | `hist_exog` = all 20 features (fully multivariate) | Same as Run 3, plus: `max_steps` doubled (tuning 500→1000, final 1000→2000) to test the undertraining hypothesis. `input_size` tuned over {24,60,120,240} → **60** (was 240 in Run 3 — the flat tuning curve shifted which candidate wins, another sign this surface is noisy) | 0.004161 | 0.002356 | 0.4970 | 0.7618 | 0.8615 | 0.0031 | -0.2217 |
+| 4 | 2026-08-05 | [`c24a537`](https://github.com/WoodyChang21/ECE1508_GenAI/commit/c24a537) | `hist_exog` = all 20 features (fully multivariate) | Same as Run 3, plus `max_steps` doubled (tuning 500→1000, final 1000→2000) to test the undertraining hypothesis. `input_size` tuned over {24,60,120,240} → 240 | 0.004149 | 0.002337 | 0.5367 | 0.7999 | 0.8919 | 0.6373 | -0.2485 |
 
-**Run 4 — `input_size` tuning (val MAE):**
+<sup>`input_size` val MAE: 24→0.542263, 60→0.540281, 120→0.538330, **240→0.537122 (selected)** — note the winner flipped again vs. the original run's `60`, another data point that this axis is flat/noisy.</sup>
 
-| input_size | 24 | 60 (selected) | 120 | 240 |
-|---|---|---|---|---|
-| val MAE | 0.543702 | **0.536928** | 0.538877 | 0.538860 |
+**⚠️ Correction on rerun: the original "undertraining hypothesis confirmed" claim does not reproduce.** The original run found doubling `max_steps` fixed Run 3's bias collapse (predict-up rate 96.7%→55.6%, close to the 53.4% true base rate). This rerun, same doubled-training protocol, still shows strong bias: predict-up rate **88.3%**, Dir Acc only 0.2pp above base rate, confidence-quartile accuracy flat (0.506/0.548/0.543/0.549). Most likely explanation: the different `input_size` winner (240 here vs. 60 originally) and/or ordinary training variance — not a deterministic fix. Net conclusion is unchanged (Dir Acc/Sharpe are still artifacts, not skill), but "more training fixes the collapse" should be treated as an open question, not a settled finding.
 
-**Run 4 — diagnostic comparison against Run 3 (same architecture, 2x training steps):**
-
-| | Run 3 (500/1000 steps) | Run 4 (1000/2000 steps) |
-|---|---|---|
-| Fraction of predictions that are "up" | 96.7% | **55.6%** (true base rate: 53.4%) |
-| mean(pred) | positive, clearly biased | **-0.000008** (essentially zero) |
-| std(pred) / std(y) | 0.06 | 0.08 (still tiny, but no longer collapsed to near-constant) |
-| corr(loc_raw, y[t-1]) | 0.0074 | -0.0289 |
-| Dir Acc | 0.5362 (debunked — see above) | **0.4970** |
-| Cov 80% / 90% | 0.7890 / 0.8850 | 0.7618 / 0.8615 (worse) |
-| Sharpe | 0.5254 (debunked — see above) | **0.0031** |
-
-**Run 4 notes (`max_steps` doubled — testing the undertraining hypothesis):**
-- **Part 1 of the hypothesis confirmed: the near-constant "always predict up" collapse was genuinely an undertraining artifact.** With double the steps, the prediction-positive rate dropped from a wildly-biased 96.7% to 55.6% — close to the test set's actual 53.4% up-rate, and `mean(pred)` moved from clearly-positive to essentially zero. This is a clean, well-earned confirmation: Run 3's model hadn't been trained long enough to move past a degenerate "predict positive most of the time" shortcut.
-- **Part 2: fixing that artifact did not reveal hidden skill underneath.** Once the bias is gone, directional accuracy reverts to **0.4970 — at or slightly below pure chance**, and both Sharpe (0.5254→0.0031) and the earlier "improvement" essentially vanish along with it. This directly confirms the debunking analysis from Run 3: that run's impressive-looking Dir Acc and Sharpe were artifacts of the bias, not real signal, and removing the bias exposes there was nothing underneath it.
-- **RMSE/MAE remain completely flat** (0.004159→0.004161, 0.002358→0.002356) — across every single PatchTST run logged in this document (Runs 1–4, spanning point-wise MSE, distributional NLL, channel-weighting fixes, cross-channel attention, and now 2x training budget), MAE has stayed in a narrow 0.00235–0.00254 band. Nothing tried so far has moved this metric meaningfully.
-- **Calibration got worse, not better, with more training** (Cov 80%: 0.7890→0.7618; Cov 90%: 0.8850→0.8615) — this refutes the other half of the undertraining hypothesis. More steps didn't fix calibration; if anything it's now the worst of any post-Run-1 result. The calibration regression from `channel_attention=True` is evidently not simply a training-budget issue.
-- **Bottom line**: this was a well-designed, well-earned test, and its answer is now clear rather than assumed. `max_steps` was a real bottleneck for the specific degenerate collapse, but not for the model's actual forecasting ability or its interval calibration — both look like genuine ceilings of this architecture/data combination at `h=1`, not artifacts of insufficient training. This is now consistent with everything else found across both models in this entire project: one-step-ahead hourly SPY return prediction sits very close to the noise floor, and no optimization attempted so far (data-wise or model-wise, for either DeepAR or PatchTST) has moved point-forecast accuracy or directional accuracy meaningfully past that floor.
-
-### Where this leaves PatchTST optimization
-
-Increasing training budget is now a dead end — ruled out with direct evidence rather than assumed. Remaining untried levers, in rough order of promise:
-1. **Feature curation** (raised earlier, now more clearly motivated): trim redundant/heavily-lagged indicators (`bb_upper/lower/width`, `MACD`, `RSI` are all derived from the same underlying price series and highly collinear with each other) and consider adding features that more directly capture very-recent price dynamics, now that `channel_attention=True` means such changes could actually reach `return_1h`'s forecast.
-2. **Recalibration**: since more training made calibration worse rather than better, a conformal-calibration layer on top of the analytic quantiles (removed after Run 2, since analytic intervals were briefly excellent) may need to come back as a permanent fix rather than a fallback.
-3. **Accept the ceiling**: given the consistency of this finding across both models and every optimization attempted, it may be more productive to shift focus to final DeepAR-vs-PatchTST comparison/synthesis than to continue chasing marginal PatchTST tuning.
-
-**Two concrete next steps, cheapest first:**
-1. **Increase `max_steps`** (e.g. 1000/2000 instead of 500/1000) — cheapest possible test of the "undertrained for the added complexity" hypothesis, no architecture change.
-2. **Reintroduce a conformal recalibration layer** on top of the analytic quantiles (the same technique already used for DeepAR, and for PatchTST's original point-wise run) — this would directly guarantee correct coverage regardless of whether the underlying `scale` parameter is well-calibrated, at the cost of losing the "fully analytic, no post-hoc correction" property Run 2/3 currently have.
-
-**📌 Direction change after Run 4**: given `channel_attention=True` underperformed Run 2 on every non-debunked metric across both attempts (Run 3, Run 4), `patchtst.ipynb` was reverted to Run 2's exact configuration (commit `8083e60`: `channel_attention=False`, channel-0-only loss, `max_steps=500/1000`). All further optimization below builds from **Run 2 specifically**, not from the `channel_attention=True` branch — see the "Run 2-series" sub-experiments that follow.
+**📌 Direction change after Run 4**: `channel_attention=True` underperformed Run 2 on every non-debunked metric across both attempts (Run 3, Run 4) — `patchtst.ipynb` was reverted to Run 2's config (`channel_attention=False`, channel-0-only loss, `max_steps=500/1000`). All further optimization below builds from **Run 2 specifically** — see the "Run 2-series" sub-experiments that follow.
 
 ---
 
