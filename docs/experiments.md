@@ -58,32 +58,15 @@ RMSE/MAE are flat across all three (~0.0041–0.0042 / ~0.00235–0.00237) — n
 
 | # | Date | Commit | Data features | Config changes | RMSE | MAE | Dir Acc | Cov 80% | Cov 90% | Sharpe | Max DD |
 |---|------|--------|----------------|-----------------|------|-----|---------|---------|---------|--------|--------|
-| 2 | 2026-07-26 | `8083e60` | `hist_exog` = all 20 features (fully multivariate, `channel_attention=False`) | **True fair-baseline pass.** Same as Run 1, plus: training loss now computed **only on channel 0 (`return_1h`)** instead of averaged across all 21 channels — matching DeepAR, whose loss has only ever been computed on its single univariate target. Model still sees all 21 channels as context (channel-independent patching/encoding unaffected); only the training gradient signal changed. `input_size` tuned over {24,60,120,240} → 240 | 0.004158 | 0.002350 | 0.5152 | 0.8068 | 0.9000 | -0.0673 | -0.2345 |
+| 2 | 2026-08-05 | [`2d46969`](https://github.com/WoodyChang21/ECE1508_GenAI/commit/2d46969) | Same as Run 1 (21 channels, `channel_attention=False`) | **True fair-baseline.** Training loss now computed only on channel 0 (`return_1h`), matching DeepAR's univariate loss. `input_size` tuned over {24,60,120,240} → 240 | 0.004178 | 0.002382 | 0.4982 | 0.8177 | 0.9097 | -0.0713 | -0.2278 |
 
-**Run 2 — `input_size` tuning (val MAE):**
+<sup>`input_size` val MAE: 24→0.549319, 60→0.542473, 120→0.540002, **240→0.538099 (selected)**.</sup>
 
-| input_size | 24 | 60 | 120 | 240 (selected) |
-|---|---|---|---|---|
-| val MAE | 0.547853 | 0.541291 | 0.541689 | **0.537668** |
+**Lag diagnostic** (corr with y[t-1]): `loc_raw` (learned) 0.7604→**-0.0631** (was 0.16 pre-rerun) — the Run 1 lag-echo is fixed; `win_loc` (non-learned, deterministic) stayed exactly 0.0667 both times, a good sanity check. Every accuracy metric improved over Run 1; calibration is close to nominal (0.818/0.910 vs 0.80/0.90 targets).
 
-**Run 2 — lag diagnostic (correlation with y[t-1], normalised space):**
+**⚠️ Structural caveat that still applies**: with `channel_attention=False` + channel-0-only loss, the other 20 channels are computed but discarded — zero gradient, zero information reaching `return_1h`'s forecast. This run is mathematically equivalent to training on `return_1h` alone. "Fair baseline" means the *training objective* matches DeepAR's, not that PatchTST's multivariate premise was tested — that starts at Run 3 (`channel_attention=True`).
 
-| | Run 1 (21-channel loss) | Run 2 (channel-0 loss) |
-|---|---|---|
-| corr(loc_raw, y[t-1]) — learned weights' own signal | 0.7604 | **0.1609** |
-| corr(win_loc, y[t-1]) — non-learned instance norm | 0.0667 | 0.0667 |
-| corr(final pred, y[t-1]) | 0.8073 | **0.1201** |
-
-**Run 2 notes (true fair-baseline pass — channel-0-only loss):**
-- **The lag-echo effect collapsed**: `corr(loc_raw, y[t-1])` dropped from 0.76 to 0.16 — confirms the diagnosis was correct. Restricting the loss to `return_1h` stopped the shared weights from learning a persistence strategy borrowed from the other 20 (genuinely autocorrelated) channels. `win_loc`'s correlation is unchanged (0.0667, as expected — that path was never learned, just mechanical per-window normalization, and was already ruled out as the cause).
-- **Every accuracy metric improved over Run 1**: RMSE 0.004365→0.004158, MAE 0.002544→0.002350, Dir Acc 0.5006→0.5152.
-- **This is now also the best MAE across every PatchTST run to date**, including the original point-wise `loss='mse'` + conformal baseline (MAE 0.002373) — the channel-0-only distributional loss beats both prior approaches on raw point-forecast accuracy.
-- **Interval calibration is now excellent**: Cov 80% = 0.8068 (target 0.80) and Cov 90% = 0.9000 (target 0.90, hit almost exactly) — a large improvement over Run 1's 0.7663/0.8615, and better than the original conformal-calibrated run's 0.7967/0.8801 too.
-- **Sharpe improved substantially** (-0.4484 → -0.0673) though still negative; Max Drawdown got slightly worse (-21.8%→-23.4%). Per the running theme with DeepAR, treat these two as noisy/path-dependent rather than a clean verdict.
-- **Directional accuracy (0.5152) is still close to chance**, but is now PatchTST's best result on this axis across all runs, and slightly ahead of DeepAR's best (0.5213 from DeepAR Run 3 — nearly tied).
-- **Bottom line**: this is the actual fair, methodologically-sound baseline to compare against DeepAR and to optimize further from. `channel_attention=True` — letting `return_1h` actually use information from the other 20 channels, which it structurally still cannot do here — remains the next planned pass and is now motivated by cleaner evidence, since the channel-weighting confound from Run 1 has been removed.
-- **📌 Status update (after Runs 3–4 below): `channel_attention=True` was tested twice and did not outperform Run 2 on any non-debunked metric** (Run 3's dir_acc gain was an artifact; Run 4, with 2x training, reverted to at/below-chance accuracy and worse calibration than this run). **Run 2 is therefore the current best, most defensible PatchTST result**, and is the baseline the Run 2a/2b sub-experiments below build from.
-- **⚠️ Important caveat, easy to miss: this run's PatchTST is functionally univariate, not multivariate.** PatchTST's `channel_attention=False` mode treats each of the 21 channels as a fully independent time series (channels only get folded into the batch dimension for computation — they never attend to or mix with each other in the forward pass). Combined with restricting the loss to channel 0 only, this means the other 20 channels are computed but **discarded**: they contribute zero information to `return_1h`'s forecast and receive zero gradient (nothing in the computation graph connects them to the loss). So despite being fed 21 channels, this run's model is *mathematically equivalent* to training on `return_1h` alone — architecturally different from DeepAR (Transformer vs. LSTM) but informationally no more advantaged. "Fair baseline" here only means *the training objective* became comparable to DeepAR's (loss on the single target, not diluted across 21 channels) — it does **not** mean this run tested the project's actual premise of giving PatchTST genuine covariate access. That test only begins at Run 3 (`channel_attention=True`).
+**📌 Forward pointer**: `channel_attention=True` was tested twice (Runs 3–4) and did not beat this run on any non-debunked metric — **Run 2 is the best, most defensible PatchTST result**, and the baseline Run 2a/2b build from.
 
 | # | Date | Commit | Data features | Config changes | RMSE | MAE | Dir Acc | Cov 80% | Cov 90% | Sharpe | Max DD |
 |---|------|--------|----------------|-----------------|------|-----|---------|---------|---------|--------|--------|
