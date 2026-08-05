@@ -70,29 +70,11 @@ RMSE/MAE are flat across all three (~0.0041–0.0042 / ~0.00235–0.00237) — n
 
 | # | Date | Commit | Data features | Config changes | RMSE | MAE | Dir Acc | Cov 80% | Cov 90% | Sharpe | Max DD |
 |---|------|--------|----------------|-----------------|------|-----|---------|---------|---------|--------|--------|
-| 3 | 2026-07-26 | `4714067` | `hist_exog` = all 20 features (fully multivariate) | Same as Run 2, plus: `channel_attention=True` — adds a per-layer cross-channel attention sublayer so `return_1h`'s representation can actually attend to the other 20 channels' patch representations (previously `False`: fully channel-independent, no cross-channel information flow at all). `input_size` tuned over {24,60,120,240} → 240 | 0.004159 | 0.002358 | **0.5362** | 0.7890 | 0.8850 | 0.5254 | -0.2718 |
+| 3 | 2026-08-05 | [`28518ec`](https://github.com/WoodyChang21/ECE1508_GenAI/commit/28518ec) | `hist_exog` = all 20 features (fully multivariate) | Same as Run 2, plus `channel_attention=True` — `return_1h` can now attend to the other 20 channels' patch representations (previously `False`: fully channel-independent). `input_size` tuned over {24,60,120,240} → 240 | 0.004153 | 0.002344 | 0.5322 | 0.7955 | 0.8951 | 0.3311 | -0.2463 |
 
-**Run 3 — `input_size` tuning (val MAE):**
+<sup>`input_size` val MAE: 24→0.541789, 60→0.541271, 120→0.538401, **240→0.537351 (selected)**.</sup>
 
-| input_size | 24 | 60 | 120 | 240 (selected) |
-|---|---|---|---|---|
-| val MAE | 0.539819 | 0.538239 | 0.538333 | **0.538231** |
-
-**Run 3 — lag diagnostic (correlation with y[t-1], normalised space):**
-
-| | Run 1 (21-ch loss) | Run 2 (ch-0 loss) | Run 3 (+ channel_attention) |
-|---|---|---|---|
-| corr(loc_raw, y[t-1]) | 0.7604 | 0.1609 | **0.0074** |
-| corr(win_loc, y[t-1]) | 0.0667 | 0.0667 | 0.0667 |
-| corr(final pred, y[t-1]) | 0.8073 | 0.1201 | **0.0721** |
-
-**Run 3 notes (`channel_attention=True` — return_1h can now use the other 20 channels):**
-- **⚠️ The directional-accuracy gain is debunked — it is not genuine skill.** A follow-up check (base rate + prediction-sign-rate + accuracy-by-confidence-quartile) found: the model predicts "up" on **96.7%** of all test bars (vs. only 53.4% of bars actually being up), i.e. it has collapsed to a near-constant, tiny positive output (`std(pred)` ≈ 6% of `std(y)`). The test period's true base rate is 53.4% up — a trivial "always predict up" strategy scores 53.4% dir_acc for free. The model's actual 53.62% is only 0.2pp above that trivial baseline, and accuracy does **not** improve with prediction confidence (quartile dir_acc: 0.506, 0.566, 0.535, 0.539 — flat/noisy, not monotonic, as genuine skill would show). **Conclusion: the model learned the test period's overall bullish drift, not per-bar directional signal.**
-- **The "lag-echo fixed" framing below also needs a caveat, given the above.** `corr(loc_raw, y[t-1])` dropping to 0.0074 is consistent with a genuine fix, but is *also* exactly what you'd expect from a near-constant series with almost no variance — correlation with anything trends toward zero when there's little signal to correlate in the first place. This doesn't cleanly separate "the persistence heuristic was replaced with something better" from "the model just collapsed to a safer, blander constant." Treat the lag-diagnostic improvement as suggestive, not confirmed.
-- **RMSE/MAE are essentially unchanged** (0.004158→0.004159, 0.002350→0.002358) — no measurable improvement in point-forecast accuracy from this change.
-- **Interval calibration regressed**: Cov 80% 0.8068→0.7890 and Cov 90% 0.9000→0.8850 — both moved from Run 2's near-exact calibration back toward undercoverage. This is the one clear, directly-attributable cost of this change.
-- **Sharpe improved a lot** (-0.0673→0.5254) but Max Drawdown got worse (-23.4%→-27.2%) — per the established pattern with DeepAR, treat both as noisy/path-dependent, not confirmation of anything.
-- **Net honest read**: given RMSE/MAE flat, calibration worse, and the dir_acc "win" debunked, Run 3 does not yet demonstrate a measurable improvement over Run 2 on any metric. It's being kept (not reverted to `channel_attention=False`) for a structural reason, not a performance one: given the channel-0-only training loss (Run 2's fix), `channel_attention=False` means the other 20 channels receive **zero gradient and contribute zero information** to `return_1h`'s forecast — they're computed and then completely discarded. `channel_attention=True` is the only mechanism by which those channels can matter at all under this loss setup, so it's a structural prerequisite for testing "do covariates help," not an optimization that's paid off yet on its own.
+**⚠️ Debunked — Dir Acc/Sharpe are a bias artifact, not skill.** Model predicts "up" on 92.7% of test bars (true base rate 53.4%); overall Dir Acc (0.5322) is only ~0.1pp above that trivial baseline; `std(pred)/std(y)` ≈ 0.05 (near-collapsed); accuracy-by-confidence-quartile is flat/noisy (0.503/0.554/0.535/0.536), not monotonic as real skill would show. RMSE/MAE unchanged from Run 2; calibration slightly regressed. **Kept anyway for a structural reason**: with Run 2's channel-0-only loss, `channel_attention=False` means the other 20 channels get zero gradient — `channel_attention=True` is the only way they can matter at all, making this a required step to even test "do covariates help," independent of whether it paid off yet.
 
 ### Biggest remaining problem, and the next optimization to try
 
