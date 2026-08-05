@@ -29,7 +29,9 @@ from src.data_pipeline import (
     WindowSampler,
     build_dataset,
     context_bucket,
+    exit_price_from_components,
     extract_arrays,
+    per_bar_close_return,
     reconstruct_prices,
     reconstruct_volume,
     to_patchtst_input,
@@ -41,6 +43,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefm
 logger = logging.getLogger(__name__)
 
 BUCKETS = ["short", "medium", "long"]
+BACKTEST_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.9]
 
 
 def parse_args() -> argparse.Namespace:
@@ -183,6 +186,110 @@ def metrics_for_slice(true_y, pt_y, cvae_y, close_0, stats) -> dict:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Long-only selective backtest
+#
+# Entry is always close_0 (real, known). Exit (for realized PnL) is the mean of the
+# 3 horizon bars' real open+close prices -- a simple deterministic stand-in for "some
+# reasonable fill within the window" rather than a specific exit-timing rule. Each
+# model's own confidence score decides which windows are worth trading at all; the
+# realized return used for PnL always comes from ground truth, never predictions.
+# ---------------------------------------------------------------------------
+
+
+def percentile_rank(values: np.ndarray) -> np.ndarray:
+    """0..1 rank (0 = smallest). Used to put PatchTST's point-forecast magnitude on the
+    same [0,1] threshold scale as CVAE's sample-agreement fraction."""
+    n = len(values)
+    if n <= 1:
+        return np.zeros(n)
+    order = np.argsort(values)
+    ranks = np.empty(n)
+    ranks[order] = np.arange(n)
+    return ranks / (n - 1)
+
+
+def cvae_confidence_scores(cvae_price_samples: np.ndarray, close_0: np.ndarray) -> np.ndarray:
+    """cvae_price_samples: (K,N,3,4). Returns (N,): fraction of the K sampled paths
+    whose predicted exit price comes out above close_0. ~1 = strong sample consensus on
+    an upward exit, ~0.5 = samples disagree (chop), ~0 = consensus downtrend -- one
+    score captures all three of the "don't trade this" cases at once."""
+    if cvae_price_samples.shape[1] == 0:
+        return np.empty(0)
+    exit_prices = exit_price_from_components(cvae_price_samples, close_0)  # (K, N)
+    sample_return = exit_prices / close_0[None, :] - 1.0
+    return (sample_return > 0).mean(axis=0)
+
+
+def patchtst_confidence_scores(pt_price: np.ndarray, close_0: np.ndarray) -> np.ndarray:
+    """pt_price: (N,3,4). PatchTST has no sample distribution, so: (1) require all 3
+    predicted bar-close-returns to agree on the up direction (else auto-dismissed as
+    choppy/down -- confidence 0), (2) rank surviving windows by predicted exit-return
+    magnitude and convert to a [0,1] percentile, matching CVAE's threshold scale."""
+    n = len(pt_price)
+    if n == 0:
+        return np.empty(0)
+    coherent_up = (per_bar_close_return(pt_price) > 0).all(axis=1)
+    exit_price = exit_price_from_components(pt_price, close_0)
+    predicted_exit_return = exit_price / close_0 - 1.0
+
+    confidence = np.zeros(n)
+    if coherent_up.any():
+        confidence[coherent_up] = percentile_rank(predicted_exit_return[coherent_up])
+    return confidence
+
+
+def sweep_thresholds(
+    confidence: np.ndarray, true_trade_return: np.ndarray, thresholds: list[float]
+) -> list[dict]:
+    n = len(confidence)
+    rows = []
+    for th in thresholds:
+        mask = confidence >= th
+        k = int(mask.sum())
+        row = {"threshold": th, "n_trades": k, "selectivity": (k / n) if n else 0.0}
+        if k > 0:
+            rets = true_trade_return[mask]
+            row["win_rate"] = float((rets > 0).mean())
+            row["avg_return"] = float(rets.mean())
+            row["total_return"] = float(rets.sum())
+        else:
+            row["win_rate"] = None
+            row["avg_return"] = None
+            row["total_return"] = None
+        rows.append(row)
+    return rows
+
+
+def run_backtest(true_y: np.ndarray, pt_y: np.ndarray, cvae_y: np.ndarray, close_0: np.ndarray) -> dict:
+    """true_y/pt_y: (N,15). cvae_y: (K,N,15). close_0: (N,)."""
+    n = len(true_y)
+    note = (
+        "long-only: entry=close_0 (real); exit=mean of the 3 horizon bars' real "
+        "open+close prices (ground truth). confidence (per model) decides which "
+        "windows to trade. total_return is summed across selected trades -- test "
+        "windows are independently sampled and can overlap in calendar time, so this "
+        "is not a sequential equity curve."
+    )
+    if n == 0:
+        return {"note": note, "patchtst": [], "cvae": []}
+
+    true_price = true_y[:, :12].reshape(n, 3, 4)
+    pt_price = pt_y[:, :12].reshape(n, 3, 4)
+    cvae_price_samples = cvae_y[..., :12].reshape(cvae_y.shape[0], n, 3, 4)
+
+    true_trade_return = exit_price_from_components(true_price, close_0) / close_0 - 1.0
+
+    cvae_conf = cvae_confidence_scores(cvae_price_samples, close_0)
+    pt_conf = patchtst_confidence_scores(pt_price, close_0)
+
+    return {
+        "note": note,
+        "patchtst": sweep_thresholds(pt_conf, true_trade_return, BACKTEST_THRESHOLDS),
+        "cvae": sweep_thresholds(cvae_conf, true_trade_return, BACKTEST_THRESHOLDS),
+    }
+
+
 def make_plots(df, feat, opens, closes, stats, patchtst, cvae, test_pairs, args, device):
     from src.data_pipeline import build_window
 
@@ -285,12 +392,16 @@ def main() -> None:
     )
 
     results = {"overall": metrics_for_slice(true_y, pt_y, cvae_y, close_0, stats)}
+    results["overall"]["backtest"] = run_backtest(true_y, pt_y, cvae_y, close_0)
 
     buckets = np.array([context_bucket(c) for c in ctx_bars])
     for bucket in BUCKETS:
         mask = buckets == bucket
         results[bucket] = metrics_for_slice(
             true_y[mask], pt_y[mask], cvae_y[:, mask], close_0[mask], stats
+        )
+        results[bucket]["backtest"] = run_backtest(
+            true_y[mask], pt_y[mask], cvae_y[:, mask], close_0[mask]
         )
 
     Path(args.metrics_out).parent.mkdir(parents=True, exist_ok=True)

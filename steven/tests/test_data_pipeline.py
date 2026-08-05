@@ -200,3 +200,64 @@ def test_gap_report_detects_missing_and_short_days():
     assert str(pd.Timestamp(missing_day).date()) in report["missing_days"]
     assert report["n_short_days"] == 1
     assert report["short_days"][str(pd.Timestamp(short_day).date())] == 4
+
+
+# ---------------------------------------------------------------------------
+# Long-only backtest helpers
+# ---------------------------------------------------------------------------
+
+
+def test_exit_price_from_components_matches_manual_average():
+    raw = _make_synthetic_ohlcv(n_days=20, seed=7)
+    feat_df = _featurize_and_normalize(raw)
+    feat, opens, closes = dp.extract_arrays(feat_df)
+
+    start_idx, ctx_bars = 5, 21
+    window = dp.build_window(feat, opens, closes, start_idx, ctx_bars)
+    price_components = window["y"][:12].reshape(3, 4)
+
+    exit_price = dp.exit_price_from_components(price_components, window["close_0"])
+
+    hz_start = start_idx + ctx_bars
+    true_bars = feat_df.iloc[hz_start : hz_start + 3][["open", "close"]].to_numpy()
+    expected = true_bars.sum() / 6.0  # (o1+c1+o2+c2+o3+c3) / 6
+
+    np.testing.assert_allclose(exit_price, expected, rtol=1e-5)
+
+
+def test_exit_price_from_components_batched():
+    """Same function, batched over a leading window dimension, should match the
+    single-window computation elementwise."""
+    raw = _make_synthetic_ohlcv(n_days=20, seed=8)
+    feat_df = _featurize_and_normalize(raw)
+    feat, opens, closes = dp.extract_arrays(feat_df)
+
+    windows = [dp.build_window(feat, opens, closes, i, 14) for i in (0, 5, 10)]
+    components = np.stack([w["y"][:12].reshape(3, 4) for w in windows])
+    close_0 = np.array([w["close_0"] for w in windows])
+
+    batched = dp.exit_price_from_components(components, close_0)
+    individual = np.array(
+        [dp.exit_price_from_components(c, c0) for c, c0 in zip(components, close_0)]
+    )
+    np.testing.assert_allclose(batched, individual, rtol=1e-6)
+
+
+def test_per_bar_close_return_sign_matches_open_close_direction():
+    raw = _make_synthetic_ohlcv(n_days=20, seed=9)
+    feat_df = _featurize_and_normalize(raw)
+    feat, opens, closes = dp.extract_arrays(feat_df)
+
+    start_idx, ctx_bars = 0, 14
+    window = dp.build_window(feat, opens, closes, start_idx, ctx_bars)
+    price_components = window["y"][:12].reshape(3, 4)
+
+    close_ret = dp.per_bar_close_return(price_components)
+    assert close_ret.shape == (3,)
+
+    hz_start = start_idx + ctx_bars
+    close_0 = window["close_0"]
+    true_closes = feat_df.iloc[hz_start : hz_start + 3]["close"].to_numpy()
+    expected_sign = np.sign(true_closes - close_0)
+
+    np.testing.assert_array_equal(np.sign(close_ret), expected_sign)

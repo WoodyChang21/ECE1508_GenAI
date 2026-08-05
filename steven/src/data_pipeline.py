@@ -346,6 +346,28 @@ def reconstruct_volume(log_volume_norm: np.ndarray, stats: NormStats) -> np.ndar
 
 
 # ---------------------------------------------------------------------------
+# Long-only backtest helpers
+# ---------------------------------------------------------------------------
+
+
+def exit_price_from_components(components: np.ndarray, close_0) -> np.ndarray:
+    """components: (..., 3, 4) [open_ret, body_ret, upper_wick, lower_wick] per horizon
+    bar. close_0: scalar or (...) matching components' leading batch dims.
+
+    Exit price = mean of the 3 bars' open+close absolute prices (6 values / 6) -- a
+    simple, deterministic stand-in for "some reasonable fill within the 3-bar window"
+    that avoids picking a specific exit-timing rule. Returns (...,)."""
+    ohlc = reconstruct_prices(components, close_0)  # (..., 3, 4): open,high,low,close
+    return ohlc[..., [0, 3]].mean(axis=(-2, -1))  # mean of open(idx0) & close(idx3), all 3 bars
+
+
+def per_bar_close_return(components: np.ndarray) -> np.ndarray:
+    """components: (..., 3, 4). Returns (..., 3): close_0-anchored close return
+    (open_ret + body_ret) per horizon bar -- used to check directional coherence."""
+    return components[..., 0] + components[..., 1]
+
+
+# ---------------------------------------------------------------------------
 # torch Dataset wrappers
 # ---------------------------------------------------------------------------
 
