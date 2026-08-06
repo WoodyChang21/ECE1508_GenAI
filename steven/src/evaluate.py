@@ -1,10 +1,22 @@
 """Evaluate PatchTST and the CVAE on the same fixed test window set.
 
+--patchtst-checkpoint accepts either architecture's checkpoint -- the original
+hand-rolled PatchTST (src/models/patchtst.py) or the HF PatchTSTModel-backed PatchTSTHF
+(src/models/patchtst_hf.py) -- auto-detected from the checkpoint's saved config (see
+detect_patchtst_arch). The HF architecture only supports a fixed context_length (no
+variable-length curriculum), so when it's detected, test/plot windows are restricted to
+that fixed length instead of steven's original 2-10 day curriculum -- see
+build_patchtst_model/run_patchtst and the arch branches in main()/make_plots().
+
 Usage:
     python steven/src/evaluate.py \\
         --patchtst-checkpoint steven/outputs/patchtst_checkpoint.pt \\
         --cvae-checkpoint steven/outputs/cvae_checkpoint.pt \\
         --n-test-windows 300 --num-plot-windows-per-bucket 2
+
+    python steven/src/evaluate.py \\
+        --patchtst-checkpoint steven/outputs/patchtst_false_checkpoint.pt \\
+        --cvae-checkpoint steven/outputs/cvae_checkpoint.pt
 """
 
 from __future__ import annotations
@@ -28,6 +40,8 @@ import mplfinance as mpf
 
 from src.data_pipeline import (
     HORIZON,
+    MAX_CONTEXT,
+    N_FEATURE_CHANNELS,
     WindowDataset,
     WindowSampler,
     build_dataset,
@@ -44,6 +58,7 @@ from src.data_pipeline import (
 )
 from src.models.cvae_inpainting import CVAEInpainting
 from src.models.patchtst import PatchTST
+from src.models.patchtst_hf import PatchTSTHF
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
@@ -95,6 +110,40 @@ def resolve_device(name: str) -> torch.device:
     return torch.device(name)
 
 
+def detect_patchtst_arch(model_cfg: dict) -> str:
+    """'hf' for the HF PatchTSTModel-backed PatchTSTHF (src/models/patchtst_hf.py,
+    identifiable by its channel_attention key), 'custom' for the original hand-rolled
+    PatchTST (src/models/patchtst.py, which has no such key). Auto-detected from the
+    checkpoint's saved config so --patchtst-checkpoint works for either without a
+    separate CLI flag."""
+    return "hf" if "channel_attention" in model_cfg else "custom"
+
+
+def build_patchtst_model(pt_ckpt: dict, device: torch.device):
+    """Reconstructs whichever PatchTST architecture produced pt_ckpt (see
+    detect_patchtst_arch), loads its weights, and returns (model, arch)."""
+    cfg = pt_ckpt["config"]
+    arch = detect_patchtst_arch(cfg["model"])
+    if arch == "hf":
+        model = PatchTSTHF(context_length=cfg["context_length"], **cfg["model"])
+    else:
+        model = PatchTST(**cfg["model"])
+    model.load_state_dict(pt_ckpt["model_state"])
+    model.to(device).eval()
+    return model, arch
+
+
+def run_patchtst(patchtst, arch: str, context: torch.Tensor, patch_pad: torch.Tensor):
+    """Dispatches to whichever calling convention this architecture uses. context is
+    already masked_tensor[:MAX_CONTEXT, :N_FEATURE_CHANNELS] either way (see
+    to_patchtst_input) -- only the HF model ignores patch_pad, since PatchTSTHF has a
+    fixed context_length and was never trained on padded/short-context windows (see
+    module docstring)."""
+    if arch == "hf":
+        return patchtst(context)
+    return patchtst(context, patch_pad)
+
+
 def collate(batch: list[dict]) -> dict:
     context, patch_pad = zip(*(to_patchtst_input(b["masked_tensor"].numpy()) for b in batch))
     return {
@@ -119,7 +168,7 @@ def directional_accuracy(pred_close_ret: np.ndarray, true_close_ret: np.ndarray)
     return (np.sign(pred_close_ret) == np.sign(true_close_ret)).mean(axis=0)
 
 
-def collect_predictions(patchtst, cvae, loader, device, num_samples):
+def collect_predictions(patchtst, arch, cvae, loader, device, num_samples):
     """Runs both models over the fixed test loader, returns flat numpy arrays."""
     all_true_y, all_pt_y = [], []
     all_cvae_y = []  # (K, N, 15)
@@ -132,7 +181,7 @@ def collect_predictions(patchtst, cvae, loader, device, num_samples):
         y = batch["y"]
 
         with torch.no_grad():
-            pt_price, pt_vol = patchtst(context, patch_pad)
+            pt_price, pt_vol = run_patchtst(patchtst, arch, context, patch_pad)
             pt_y = torch.cat([pt_price.reshape(pt_price.shape[0], -1), pt_vol], dim=1)
 
             cvae_price, cvae_vol = cvae.sample(masked_tensor, k=num_samples)  # (K,B,3,4),(K,B,3)
@@ -582,7 +631,7 @@ def render_panel(
     return realized, would_enter
 
 
-def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, device, sell_bound):
+def make_plots(df, feat, opens, closes, patchtst, arch, cvae, test_sampler, args, device, sell_bound):
     """Draws num_plot_samples fresh random (start_idx, ctx_bars) windows -- NOT the
     fixed/seeded eval test_pairs -- so each run's sample plots differ. Each figure has
     3 candlestick panels: ground truth (left), PatchTST's generated horizon candles (top
@@ -630,7 +679,10 @@ def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, devi
     records = []
     plotted = 0
     for i in range(args.num_plot_samples):
-        ctx_bars = int(rng.choice(CONTEXT_LENGTHS))
+        # PatchTSTHF only supports its trained fixed context_length (no padding support --
+        # see module docstring), so plot windows are pinned to MAX_CONTEXT instead of
+        # sampling steven's original variable-length curriculum when arch == 'hf'.
+        ctx_bars = MAX_CONTEXT if arch == "hf" else int(rng.choice(CONTEXT_LENGTHS))
         starts = test_sampler.valid_starts(ctx_bars)
         if len(starts) == 0:
             logger.warning("no valid starts for ctx_bars=%d, skipping sample %d", ctx_bars, i)
@@ -644,7 +696,7 @@ def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, devi
         patch_pad_t = torch.from_numpy(patch_pad_np).unsqueeze(0).to(device)
 
         with torch.no_grad():
-            pt_price, _ = patchtst(context_t, patch_pad_t)
+            pt_price, _ = run_patchtst(patchtst, arch, context_t, patch_pad_t)
             # K draws: draw 0 is rendered as the candlestick path, all K feed the quantile target
             cvae_price, _ = cvae.sample(masked_tensor, k=args.num_samples)
 
@@ -761,9 +813,23 @@ def main() -> None:
         args.sell_bound_percentile, sell_bound,
     )
 
+    patchtst, arch = build_patchtst_model(pt_ckpt, device)
+    logger.info("patchtst checkpoint architecture: %s", arch)
+
     test_sampler = WindowSampler(*bounds["test"])
     rng = np.random.default_rng(args.seed)
-    test_pairs = test_sampler.draw(args.n_test_windows, rng)
+    if arch == "hf":
+        # PatchTSTHF only supports its trained fixed context_length -- no padding
+        # support, never trained on shorter/padded windows (see module docstring) --
+        # so evaluation is restricted to that fixed length instead of steven's original
+        # 2-10 day curriculum. All windows land in the 'long' bucket below; compare
+        # against that bucket specifically, not 'overall' from a 'custom'-arch run.
+        test_starts_full = test_sampler.valid_starts(MAX_CONTEXT)
+        n_test = min(args.n_test_windows, len(test_starts_full))
+        test_starts = rng.choice(test_starts_full, size=n_test, replace=False)
+        test_pairs = [(int(s), MAX_CONTEXT) for s in test_starts]
+    else:
+        test_pairs = test_sampler.draw(args.n_test_windows, rng)
     logger.info("evaluating on %d fixed test windows", len(test_pairs))
 
     test_ds = WindowDataset(feat, opens, closes, test_pairs)
@@ -776,16 +842,12 @@ def main() -> None:
         pin_memory=device.type == "cuda",
     )
 
-    patchtst = PatchTST(**pt_cfg["model"]).to(device)
-    patchtst.load_state_dict(pt_ckpt["model_state"])
-    patchtst.eval()
-
     cvae = CVAEInpainting(**cvae_cfg["model"]).to(device)
     cvae.load_state_dict(cvae_ckpt["model_state"])
     cvae.eval()
 
     true_y, pt_y, cvae_y, close_0, ctx_bars = collect_predictions(
-        patchtst, cvae, test_loader, device, args.num_samples
+        patchtst, arch, cvae, test_loader, device, args.num_samples
     )
 
     n, k = len(pt_y), cvae_y.shape[0]
@@ -812,7 +874,7 @@ def main() -> None:
     logger.info("wrote metrics to %s", args.metrics_out)
     logger.info("overall: %s", json.dumps(results["overall"], indent=2))
 
-    make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, device, sell_bound)
+    make_plots(df, feat, opens, closes, patchtst, arch, cvae, test_sampler, args, device, sell_bound)
 
 
 if __name__ == "__main__":
