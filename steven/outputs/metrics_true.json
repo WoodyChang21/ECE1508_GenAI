@@ -1,0 +1,345 @@
+{
+  "overall": {
+    "n_windows": 2397,
+    "patchtst_reparam_mae_rmse": [
+      0.11513102799654007,
+      0.48324185609817505
+    ],
+    "cvae_reparam_mae_rmse": [
+      0.14821505546569824,
+      0.4976014196872711
+    ],
+    "patchtst_ohlc_mae_rmse": [
+      3.5796957492326,
+      4.6973235095607
+    ],
+    "cvae_ohlc_mae_rmse": [
+      3.07500496386135,
+      4.172016437873505
+    ],
+    "patchtst_volume_mae_rmse": [
+      2865898.5,
+      9654751.0
+    ],
+    "cvae_volume_mae_rmse": [
+      2919283.0,
+      4313082.5
+    ],
+    "patchtst_directional_accuracy": [
+      0.5160617438464747,
+      0.5219023779724656,
+      0.5452649144764289
+    ],
+    "cvae_directional_accuracy": [
+      0.5056320400500626,
+      0.5448477263245723,
+      0.5331664580725908
+    ],
+    "cvae_avg_sample_variance": [
+      22.00452970944099,
+      16.031444818631183,
+      17.938191675909565
+    ],
+    "realized_close_variance": [
+      1261.6776831754087,
+      1259.4985081131015,
+      1257.3235809699966
+    ],
+    "cvae_spread_to_realized_ratio": [
+      0.017440690283163026,
+      0.012728434940862652,
+      0.014266965121317981
+    ],
+    "backtest": {
+      "note": "long-only bracket-order backtest: entry=close_0 (real). Each model's own predicted take-profit price is placed as a limit sell order at the same time as entry, with a mirrored 1:1 stop-loss the same price distance below entry (see mirrored_stop_loss). PatchTST's take-profit is the max of its predicted 3 horizon bars' own closes (single point forecast, no distribution to draw a quantile from -- see max_close_from_components); CVAE's is the p70 percentile of its K sampled draws' own predicted exit prices, since CVAE actually has a sampled distribution to pick a target from. A window is only ever eligible to trade if its own take-profit clears the buy price (2*buy_price-take_profit would put the mirrored stop-loss above entry otherwise, which makes no sense for a long) -- confidence alone can't override this. The 3 REAL horizon bars are then walked in order (see bracket_order_exit): whichever level is touched first ends the trade there; if a bar's range spans both, the stop-loss is assumed to trigger first (pessimistic tie-break, since OHLC bars don't record intrabar order); if neither is ever touched, the position is force-closed at the 3rd REAL bar's close (order expiry). total_return is summed across selected trades -- test windows are independently sampled and can overlap in calendar time, so this is not a sequential equity curve.",
+      "patchtst": [
+        {
+          "threshold": 0.5,
+          "n_trades": 803,
+          "selectivity": 0.3350020859407593,
+          "win_rate": 0.5143212951432129,
+          "avg_return": -6.828138866875586e-05,
+          "total_return": -0.05482995510101096,
+          "take_profit_rate": 0.26525529265255293,
+          "stop_loss_rate": 0.29638854296388545
+        },
+        {
+          "threshold": 0.6,
+          "n_trades": 643,
+          "selectivity": 0.2682519816437213,
+          "win_rate": 0.5132192846034215,
+          "avg_return": -0.00013491794073006727,
+          "total_return": -0.08675223588943326,
+          "take_profit_rate": 0.24416796267496113,
+          "stop_loss_rate": 0.2892690513219285
+        },
+        {
+          "threshold": 0.7,
+          "n_trades": 482,
+          "selectivity": 0.20108468919482686,
+          "win_rate": 0.5,
+          "avg_return": -0.00021866483312424644,
+          "total_return": -0.10539644956588679,
+          "take_profit_rate": 0.1950207468879668,
+          "stop_loss_rate": 0.2946058091286307
+        },
+        {
+          "threshold": 0.8,
+          "n_trades": 322,
+          "selectivity": 0.1343345848977889,
+          "win_rate": 0.5062111801242236,
+          "avg_return": -0.0002686396148634229,
+          "total_return": -0.08650195598602217,
+          "take_profit_rate": 0.17701863354037267,
+          "stop_loss_rate": 0.2857142857142857
+        },
+        {
+          "threshold": 0.9,
+          "n_trades": 161,
+          "selectivity": 0.06716729244889445,
+          "win_rate": 0.4720496894409938,
+          "avg_return": -0.0008005251795608812,
+          "total_return": -0.12888455390930187,
+          "take_profit_rate": 0.12422360248447205,
+          "stop_loss_rate": 0.2795031055900621
+        }
+      ],
+      "cvae": [
+        {
+          "threshold": 0.5,
+          "n_trades": 2190,
+          "selectivity": 0.9136420525657072,
+          "win_rate": 0.5337899543378996,
+          "avg_return": 0.00015968967427583308,
+          "total_return": 0.34972038666407446,
+          "take_profit_rate": 0.2187214611872146,
+          "stop_loss_rate": 0.24246575342465754
+        },
+        {
+          "threshold": 0.6,
+          "n_trades": 2190,
+          "selectivity": 0.9136420525657072,
+          "win_rate": 0.5337899543378996,
+          "avg_return": 0.00015968967427583308,
+          "total_return": 0.34972038666407446,
+          "take_profit_rate": 0.2187214611872146,
+          "stop_loss_rate": 0.24246575342465754
+        },
+        {
+          "threshold": 0.7,
+          "n_trades": 1755,
+          "selectivity": 0.7321652065081352,
+          "win_rate": 0.543019943019943,
+          "avg_return": 0.00020271893240447997,
+          "total_return": 0.3557717263698623,
+          "take_profit_rate": 0.20341880341880342,
+          "stop_loss_rate": 0.20968660968660968
+        },
+        {
+          "threshold": 0.8,
+          "n_trades": 1755,
+          "selectivity": 0.7321652065081352,
+          "win_rate": 0.543019943019943,
+          "avg_return": 0.00020271893240447997,
+          "total_return": 0.3557717263698623,
+          "take_profit_rate": 0.20341880341880342,
+          "stop_loss_rate": 0.20968660968660968
+        },
+        {
+          "threshold": 0.9,
+          "n_trades": 904,
+          "selectivity": 0.3771380892782645,
+          "win_rate": 0.5342920353982301,
+          "avg_return": 0.00024722460492522795,
+          "total_return": 0.22349104285240606,
+          "take_profit_rate": 0.18141592920353983,
+          "stop_loss_rate": 0.19247787610619468
+        }
+      ],
+      "buy_and_hold": {
+        "entry_date": "2024-01-02",
+        "entry_price": 471.76,
+        "exit_date": "2025-05-30",
+        "exit_price": 589.46,
+        "elapsed_years": 1.4072553045859,
+        "total_return": 0.24949126674580313,
+        "annual_return": 0.17149093074340072
+      }
+    }
+  },
+  "short": {
+    "n_windows": 0,
+    "backtest": {
+      "note": "long-only bracket-order backtest: entry=close_0 (real). Each model's own predicted take-profit price is placed as a limit sell order at the same time as entry, with a mirrored 1:1 stop-loss the same price distance below entry (see mirrored_stop_loss). PatchTST's take-profit is the max of its predicted 3 horizon bars' own closes (single point forecast, no distribution to draw a quantile from -- see max_close_from_components); CVAE's is the p70 percentile of its K sampled draws' own predicted exit prices, since CVAE actually has a sampled distribution to pick a target from. A window is only ever eligible to trade if its own take-profit clears the buy price (2*buy_price-take_profit would put the mirrored stop-loss above entry otherwise, which makes no sense for a long) -- confidence alone can't override this. The 3 REAL horizon bars are then walked in order (see bracket_order_exit): whichever level is touched first ends the trade there; if a bar's range spans both, the stop-loss is assumed to trigger first (pessimistic tie-break, since OHLC bars don't record intrabar order); if neither is ever touched, the position is force-closed at the 3rd REAL bar's close (order expiry). total_return is summed across selected trades -- test windows are independently sampled and can overlap in calendar time, so this is not a sequential equity curve.",
+      "patchtst": [],
+      "cvae": []
+    }
+  },
+  "medium": {
+    "n_windows": 0,
+    "backtest": {
+      "note": "long-only bracket-order backtest: entry=close_0 (real). Each model's own predicted take-profit price is placed as a limit sell order at the same time as entry, with a mirrored 1:1 stop-loss the same price distance below entry (see mirrored_stop_loss). PatchTST's take-profit is the max of its predicted 3 horizon bars' own closes (single point forecast, no distribution to draw a quantile from -- see max_close_from_components); CVAE's is the p70 percentile of its K sampled draws' own predicted exit prices, since CVAE actually has a sampled distribution to pick a target from. A window is only ever eligible to trade if its own take-profit clears the buy price (2*buy_price-take_profit would put the mirrored stop-loss above entry otherwise, which makes no sense for a long) -- confidence alone can't override this. The 3 REAL horizon bars are then walked in order (see bracket_order_exit): whichever level is touched first ends the trade there; if a bar's range spans both, the stop-loss is assumed to trigger first (pessimistic tie-break, since OHLC bars don't record intrabar order); if neither is ever touched, the position is force-closed at the 3rd REAL bar's close (order expiry). total_return is summed across selected trades -- test windows are independently sampled and can overlap in calendar time, so this is not a sequential equity curve.",
+      "patchtst": [],
+      "cvae": []
+    }
+  },
+  "long": {
+    "n_windows": 2397,
+    "patchtst_reparam_mae_rmse": [
+      0.11513102799654007,
+      0.48324185609817505
+    ],
+    "cvae_reparam_mae_rmse": [
+      0.14821505546569824,
+      0.4976014196872711
+    ],
+    "patchtst_ohlc_mae_rmse": [
+      3.5796957492326,
+      4.6973235095607
+    ],
+    "cvae_ohlc_mae_rmse": [
+      3.07500496386135,
+      4.172016437873505
+    ],
+    "patchtst_volume_mae_rmse": [
+      2865898.5,
+      9654751.0
+    ],
+    "cvae_volume_mae_rmse": [
+      2919283.0,
+      4313082.5
+    ],
+    "patchtst_directional_accuracy": [
+      0.5160617438464747,
+      0.5219023779724656,
+      0.5452649144764289
+    ],
+    "cvae_directional_accuracy": [
+      0.5056320400500626,
+      0.5448477263245723,
+      0.5331664580725908
+    ],
+    "cvae_avg_sample_variance": [
+      22.00452970944099,
+      16.031444818631183,
+      17.938191675909565
+    ],
+    "realized_close_variance": [
+      1261.6776831754087,
+      1259.4985081131015,
+      1257.3235809699966
+    ],
+    "cvae_spread_to_realized_ratio": [
+      0.017440690283163026,
+      0.012728434940862652,
+      0.014266965121317981
+    ],
+    "backtest": {
+      "note": "long-only bracket-order backtest: entry=close_0 (real). Each model's own predicted take-profit price is placed as a limit sell order at the same time as entry, with a mirrored 1:1 stop-loss the same price distance below entry (see mirrored_stop_loss). PatchTST's take-profit is the max of its predicted 3 horizon bars' own closes (single point forecast, no distribution to draw a quantile from -- see max_close_from_components); CVAE's is the p70 percentile of its K sampled draws' own predicted exit prices, since CVAE actually has a sampled distribution to pick a target from. A window is only ever eligible to trade if its own take-profit clears the buy price (2*buy_price-take_profit would put the mirrored stop-loss above entry otherwise, which makes no sense for a long) -- confidence alone can't override this. The 3 REAL horizon bars are then walked in order (see bracket_order_exit): whichever level is touched first ends the trade there; if a bar's range spans both, the stop-loss is assumed to trigger first (pessimistic tie-break, since OHLC bars don't record intrabar order); if neither is ever touched, the position is force-closed at the 3rd REAL bar's close (order expiry). total_return is summed across selected trades -- test windows are independently sampled and can overlap in calendar time, so this is not a sequential equity curve.",
+      "patchtst": [
+        {
+          "threshold": 0.5,
+          "n_trades": 803,
+          "selectivity": 0.3350020859407593,
+          "win_rate": 0.5143212951432129,
+          "avg_return": -6.828138866875586e-05,
+          "total_return": -0.05482995510101096,
+          "take_profit_rate": 0.26525529265255293,
+          "stop_loss_rate": 0.29638854296388545
+        },
+        {
+          "threshold": 0.6,
+          "n_trades": 643,
+          "selectivity": 0.2682519816437213,
+          "win_rate": 0.5132192846034215,
+          "avg_return": -0.00013491794073006727,
+          "total_return": -0.08675223588943326,
+          "take_profit_rate": 0.24416796267496113,
+          "stop_loss_rate": 0.2892690513219285
+        },
+        {
+          "threshold": 0.7,
+          "n_trades": 482,
+          "selectivity": 0.20108468919482686,
+          "win_rate": 0.5,
+          "avg_return": -0.00021866483312424644,
+          "total_return": -0.10539644956588679,
+          "take_profit_rate": 0.1950207468879668,
+          "stop_loss_rate": 0.2946058091286307
+        },
+        {
+          "threshold": 0.8,
+          "n_trades": 322,
+          "selectivity": 0.1343345848977889,
+          "win_rate": 0.5062111801242236,
+          "avg_return": -0.0002686396148634229,
+          "total_return": -0.08650195598602217,
+          "take_profit_rate": 0.17701863354037267,
+          "stop_loss_rate": 0.2857142857142857
+        },
+        {
+          "threshold": 0.9,
+          "n_trades": 161,
+          "selectivity": 0.06716729244889445,
+          "win_rate": 0.4720496894409938,
+          "avg_return": -0.0008005251795608812,
+          "total_return": -0.12888455390930187,
+          "take_profit_rate": 0.12422360248447205,
+          "stop_loss_rate": 0.2795031055900621
+        }
+      ],
+      "cvae": [
+        {
+          "threshold": 0.5,
+          "n_trades": 2190,
+          "selectivity": 0.9136420525657072,
+          "win_rate": 0.5337899543378996,
+          "avg_return": 0.00015968967427583308,
+          "total_return": 0.34972038666407446,
+          "take_profit_rate": 0.2187214611872146,
+          "stop_loss_rate": 0.24246575342465754
+        },
+        {
+          "threshold": 0.6,
+          "n_trades": 2190,
+          "selectivity": 0.9136420525657072,
+          "win_rate": 0.5337899543378996,
+          "avg_return": 0.00015968967427583308,
+          "total_return": 0.34972038666407446,
+          "take_profit_rate": 0.2187214611872146,
+          "stop_loss_rate": 0.24246575342465754
+        },
+        {
+          "threshold": 0.7,
+          "n_trades": 1755,
+          "selectivity": 0.7321652065081352,
+          "win_rate": 0.543019943019943,
+          "avg_return": 0.00020271893240447997,
+          "total_return": 0.3557717263698623,
+          "take_profit_rate": 0.20341880341880342,
+          "stop_loss_rate": 0.20968660968660968
+        },
+        {
+          "threshold": 0.8,
+          "n_trades": 1755,
+          "selectivity": 0.7321652065081352,
+          "win_rate": 0.543019943019943,
+          "avg_return": 0.00020271893240447997,
+          "total_return": 0.3557717263698623,
+          "take_profit_rate": 0.20341880341880342,
+          "stop_loss_rate": 0.20968660968660968
+        },
+        {
+          "threshold": 0.9,
+          "n_trades": 904,
+          "selectivity": 0.3771380892782645,
+          "win_rate": 0.5342920353982301,
+          "avg_return": 0.00024722460492522795,
+          "total_return": 0.22349104285240606,
+          "take_profit_rate": 0.18141592920353983,
+          "stop_loss_rate": 0.19247787610619468
+        }
+      ]
+    }
+  }
+}
