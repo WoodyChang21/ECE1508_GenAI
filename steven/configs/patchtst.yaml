@@ -3,11 +3,19 @@ device: auto  # auto | cpu | mps | cuda
 data_path: steven/data/spy_ohlcv_1h.parquet
 
 model:
+  # See docs/experiments.md -- HF PatchTSTModel-backed (src/models/patchtst_hf.py),
+  # not the original hand-rolled patchtst.py. channel_attention=False is the main
+  # approach for now: it beat channel_attention=True on volume RMSE stability
+  # (True showed a heavy-tailed outlier failure mode) despite True's slight edge on
+  # OHLC/Dir Acc. Override with --channel-attention / --no-channel-attention.
   d_model: 64
-  nhead: 4
-  num_layers: 3
-  dim_feedforward: 128
+  num_attention_heads: 4
+  num_hidden_layers: 3
   dropout: 0.1
+  head_dropout: 0.0
+  channel_attention: false
+  patch_length: 7
+  patch_stride: 7
 
 loss:
   w_price: 1.0
@@ -29,4 +37,8 @@ train:
   pin_memory: true    # still worth it for the host->device copy, independent of num_workers
 
 output:
-  checkpoint_path: steven/outputs/patchtst_checkpoint.pt
+  # Renamed from patchtst_checkpoint.pt -- that file is the original hand-rolled
+  # patchtst.py's checkpoint (steven's own architecture); this one is the HF-backed
+  # replacement, incompatible state_dict, kept as a separate file rather than
+  # overwriting his.
+  checkpoint_path: steven/outputs/patchtst_hf_checkpoint.pt
