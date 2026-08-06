@@ -81,8 +81,27 @@ All three below build from **Run 2's exact config**, changing one thing at a tim
 
 ---
 
+## PatchTST feature importance analysis
+
+Dedicated notebook: `notebooks/patch_tst_feature_importance.ipynb`. Trains its own `channel_attention=True` baseline (channel-0-only loss, `patch_stride` fix, mean pooling, `input_size=240` fixed, `max_steps=1000`) — required since `channel_attention=False` makes the other 20 channels structurally inert (see Run 2's caveat above), so feature importance is only answerable under this config. Adds two things missing from every other notebook in this project: a **training loss curve** (previously only post-hoc financial metrics existed, which can't distinguish "didn't converge" from "no signal") and **grouped/individual permutation importance** (shuffle a feature across test windows, measure the increase in test MAE) plus **channel-attention weight extraction**.
+
+| Run | Commit | Baseline RMSE / MAE / Dir Acc / Sharpe |
+|---|---|---|
+| No seed control (first run) | [`b7d06e5`](https://github.com/WoodyChang21/ECE1508_GenAI/commit/b7d06e5) | 0.004146 / 0.002344 / 0.5164 / 0.5959 |
+| `SEED=0` (explicit seed control added) | [`de8f191`](https://github.com/WoodyChang21/ECE1508_GenAI/commit/de8f191) | 0.004147 / 0.002342 / 0.5269 / 0.8229 |
+
+Both consistent with Run 3's numbers above, within the established noise band.
+
+- **Training loss is flat/noisy for the entire 1000 steps** — no real downward trend, oscillates in roughly the same band from step 1 to step 1000. Direct evidence (not inferred from downstream metrics) that the model reaches something close to its loss floor almost immediately and never meaningfully improves.
+- **Grouped permutation importance replicates cleanly across both runs** (same code, two different training draws): `return_1h`'s own history and price (OHLC) are clearly helpful (ΔMAE positive, outside the shuffle-noise band both times); **momentum (RSI/MACD family) and lagged returns are actively harmful** — ΔMAE negative and outside noise both times, meaning the model performs *better* with them scrambled, not just indifferent to them. Volatility/Bollinger and calendar (`is_first_bar`) are mildly positive; volume and VIX are within noise.
+- **Channel-attention weights are nearly uniform across all 21 channels** (0.047–0.050, ≈1/21 = no preference) — including for `return_1h` itself, despite permutation importance showing it's by far the most relied-upon channel. A clean, concrete illustration that attention weight and causal contribution disagree here; don't trust attention as an importance signal on its own.
+- **Bug found and fixed while building this**: `PatchTSTEncoder.forward()`'s `output_attentions=True` only exposes time-attention (sublayer 1) — it silently discards channel-attention (sublayer 2), confirmed against source (only `layer_outputs[1]` is ever appended to `all_attentions`). Required replicating the encoder's forward pass layer-by-layer to capture the real channel-attention weights. Separately, the trained model's default `sdpa` attention backend doesn't support `output_attentions=True` at all (returns `None` silently) — fixed by building an `attn_implementation='eager'` copy of the trained model for that one analysis cell only.
+- **Not yet done**: only 2 runs so far (momentum/lagged-returns-harmful should be confirmed with at least one more distinct seed before treating it as settled), and no full leave-one-out retraining to confirm the permutation-importance ranking causally.
+
+---
+
 ## Where this leaves the project
 
 Across both models and every optimization attempted (data features, tuning grids, loss functions, pooling, normalization, channel attention, training budget), **RMSE/MAE never moved meaningfully and Dir Acc never cleared chance by more than noise-level margins**. Sharpe/Max Drawdown are unreliable on their own — they swing by more than the headline "wins" they're sometimes used to support. Several apparent directional-accuracy gains were traced to the model collapsing toward a near-constant, mildly-positive prediction that free-rides the test period's bullish drift, not genuine per-bar skill.
 
-**If pursued further**: feature ablation (isolate which of the 13 calendar / 20 hist_exog features carry any real signal — `hour_sin/cos` is the most plausible candidate) and multi-seed repetition (establish a noise floor for Sharpe/Dir Acc before trusting any future delta) are the two highest-value next steps. Absent those, the honest takeaway is that one-step-ahead hourly SPY return prediction sits very close to the noise floor for both architectures tried here.
+**Feature ablation is now in progress** (see the section above) — two runs so far show momentum indicators and lagged returns as actively harmful rather than merely unhelpful, and `return_1h`'s own history plus OHLC as the clearest genuine contributors. Confirming this across another seed, and multi-seed repetition more broadly (to establish a noise floor for Sharpe/Dir Acc before trusting any future delta), remain the two highest-value next steps. Absent those, the honest takeaway is that one-step-ahead hourly SPY return prediction sits very close to the noise floor for both architectures tried here.
