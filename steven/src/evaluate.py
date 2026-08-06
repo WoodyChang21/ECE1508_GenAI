@@ -242,8 +242,24 @@ def patchtst_confidence_scores(pt_price: np.ndarray, close_0: np.ndarray) -> np.
     return confidence
 
 
+def limit_order_exit(true_ohlc: np.ndarray, sell_limit: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Simulates placing a limit sell order at sell_limit (the model's own predicted exit
+    price) at the same time as the close_0 buy, then walking the 3 REAL horizon bars in
+    order: if any bar's real [low,high] range reaches sell_limit, the order fills there (a
+    "hit"); if none of the 3 bars ever reach it, the position is force-closed at the 3rd
+    bar's real close instead. true_ohlc: (N,3,4) real [open,high,low,close]. sell_limit:
+    (N,). Returns (realized_sell_price (N,), hit (N,) bool)."""
+    low = true_ohlc[:, :, 2]
+    high = true_ohlc[:, :, 1]
+    reachable = (low <= sell_limit[:, None]) & (sell_limit[:, None] <= high)  # (N,3)
+    hit = reachable.any(axis=1)
+    forced_close = true_ohlc[:, 2, 3]  # 3rd horizon bar's real close
+    sell_price = np.where(hit, sell_limit, forced_close)
+    return sell_price, hit
+
+
 def sweep_thresholds(
-    confidence: np.ndarray, true_trade_return: np.ndarray, thresholds: list[float]
+    confidence: np.ndarray, trade_return: np.ndarray, thresholds: list[float], hit: np.ndarray | None = None
 ) -> list[dict]:
     n = len(confidence)
     rows = []
@@ -252,14 +268,16 @@ def sweep_thresholds(
         k = int(mask.sum())
         row = {"threshold": th, "n_trades": k, "selectivity": (k / n) if n else 0.0}
         if k > 0:
-            rets = true_trade_return[mask]
+            rets = trade_return[mask]
             row["win_rate"] = float((rets > 0).mean())
             row["avg_return"] = float(rets.mean())
             row["total_return"] = float(rets.sum())
+            row["limit_hit_rate"] = float(hit[mask].mean()) if hit is not None else None
         else:
             row["win_rate"] = None
             row["avg_return"] = None
             row["total_return"] = None
+            row["limit_hit_rate"] = None
         rows.append(row)
     return rows
 
@@ -268,11 +286,14 @@ def run_backtest(true_y: np.ndarray, pt_y: np.ndarray, cvae_y: np.ndarray, close
     """true_y/pt_y: (N,15). cvae_y: (K,N,15). close_0: (N,)."""
     n = len(true_y)
     note = (
-        "long-only: entry=close_0 (real); exit=mean of the 3 horizon bars' real "
-        "open+close prices (ground truth). confidence (per model) decides which "
-        "windows to trade. total_return is summed across selected trades -- test "
-        "windows are independently sampled and can overlap in calendar time, so this "
-        "is not a sequential equity curve."
+        "long-only limit-order backtest: entry=close_0 (real). Each model's own predicted "
+        "exit price (mean of its predicted 3 horizon bars' open+close; for CVAE, averaged "
+        "across the k sampled draws) is placed as a limit sell order at the same time as "
+        "entry. If any of the 3 REAL horizon bars' [low,high] range reaches that price, "
+        "the order fills there; otherwise the position is force-closed at the 3rd REAL "
+        "bar's close instead. confidence (per model) decides which windows to trade. "
+        "total_return is summed across selected trades -- test windows are independently "
+        "sampled and can overlap in calendar time, so this is not a sequential equity curve."
     )
     if n == 0:
         return {"note": note, "patchtst": [], "cvae": []}
@@ -281,15 +302,24 @@ def run_backtest(true_y: np.ndarray, pt_y: np.ndarray, cvae_y: np.ndarray, close
     pt_price = pt_y[:, :12].reshape(n, 3, 4)
     cvae_price_samples = cvae_y[..., :12].reshape(cvae_y.shape[0], n, 3, 4)
 
-    true_trade_return = exit_price_from_components(true_price, close_0) / close_0 - 1.0
+    true_ohlc = reconstruct_prices(true_price, close_0)  # (N,3,4) real [open,high,low,close]
+
+    pt_sell_limit = exit_price_from_components(pt_price, close_0)  # (N,)
+    cvae_sell_limit = exit_price_from_components(cvae_price_samples, close_0).mean(axis=0)  # (N,)
+
+    pt_sell_price, pt_hit = limit_order_exit(true_ohlc, pt_sell_limit)
+    cvae_sell_price, cvae_hit = limit_order_exit(true_ohlc, cvae_sell_limit)
+
+    pt_trade_return = pt_sell_price / close_0 - 1.0
+    cvae_trade_return = cvae_sell_price / close_0 - 1.0
 
     cvae_conf = cvae_confidence_scores(cvae_price_samples, close_0)
     pt_conf = patchtst_confidence_scores(pt_price, close_0)
 
     return {
         "note": note,
-        "patchtst": sweep_thresholds(pt_conf, true_trade_return, BACKTEST_THRESHOLDS),
-        "cvae": sweep_thresholds(cvae_conf, true_trade_return, BACKTEST_THRESHOLDS),
+        "patchtst": sweep_thresholds(pt_conf, pt_trade_return, BACKTEST_THRESHOLDS, pt_hit),
+        "cvae": sweep_thresholds(cvae_conf, cvae_trade_return, BACKTEST_THRESHOLDS, cvae_hit),
     }
 
 
@@ -302,32 +332,62 @@ def draw_horizon_box(ax, n_shown: int) -> None:
     )
 
 
-def mark_trade(ax, n_shown: int, buy_price: float, sell_price: float) -> None:
-    """Buy = dashed line at close_0 (the last known candle's close). Sell = a dot at the
-    expected exit price (mean of the 3 horizon bars' open+close), centered in the box."""
+def mark_trade(
+    ax, n_shown: int, buy_price: float, sell_limit: float, realized: tuple[float, bool] | None = None
+) -> None:
+    """Buy = dashed line at close_0 (the last known candle's close). Target = a dot at the
+    limit-order price (mean of the 3 horizon bars' open+close), centered in the box. If
+    realized is given (realized_sell_price, hit) and the limit was missed, also marks
+    where the position was actually force-closed (the 3rd real horizon bar's close)."""
     ax.axhline(buy_price, color="tab:blue", linestyle="--", linewidth=1, zorder=6)
     ax.text(-0.6, buy_price, "buy", color="tab:blue", fontsize=7, va="bottom", ha="left", zorder=6)
-    sell_x = n_shown - HORIZON / 2 - 0.5
-    ax.scatter([sell_x], [sell_price], color="purple", edgecolors="black", s=45, zorder=7)
-    ax.text(sell_x, sell_price, "  sell", color="purple", fontsize=7, va="center", ha="left", zorder=7)
+    target_x = n_shown - HORIZON / 2 - 0.5
+    ax.scatter([target_x], [sell_limit], color="purple", edgecolors="black", s=45, zorder=7)
+    ax.text(target_x, sell_limit, "  target", color="purple", fontsize=7, va="center", ha="left", zorder=7)
+
+    if realized is not None:
+        realized_price, hit = realized
+        if not hit:
+            exit_x = n_shown - 1  # 3rd (last) horizon candle
+            ax.scatter([exit_x], [realized_price], color="black", marker="x", s=55, zorder=8)
+            ax.text(
+                exit_x, realized_price, "  forced exit", color="black", fontsize=7, va="top", ha="left", zorder=8
+            )
 
 
-def trade_table_text(ohlc: np.ndarray, buy_price: float) -> tuple[str, float]:
-    """ohlc: (3,4) [open,high,low,close] for the 3 horizon bars. Returns the annotation
-    text and the expected sell price (mean of the 6 open/close values -- same definition
-    used by exit_price_from_components in the backtest)."""
-    sell_price = float(ohlc[:, [0, 3]].mean())
+def trade_table_text(
+    ohlc: np.ndarray, buy_price: float, true_horizon_ohlc: np.ndarray | None = None
+) -> tuple[str, float, tuple[float, bool] | None]:
+    """ohlc: (3,4) [open,high,low,close] for this panel's 3 horizon bars (used for the
+    per-candle numbers and to set the limit-order target price). true_horizon_ohlc, if
+    given, is the REAL 3 horizon bars' [open,high,low,close] -- used to simulate whether
+    the limit order set from `ohlc` would actually have filled against real price action
+    (see limit_order_exit). Returns (annotation text, sell_limit, realized-or-None)."""
+    sell_limit = float(ohlc[:, [0, 3]].mean())
     lines = [
         f"C1  O={ohlc[0,0]:.2f}  C={ohlc[0,3]:.2f}    "
         f"C2  O={ohlc[1,0]:.2f}  C={ohlc[1,3]:.2f}    "
         f"C3  O={ohlc[2,0]:.2f}  C={ohlc[2,3]:.2f}",
-        f"Buy (close of last known candle) = {buy_price:.2f}      "
-        f"Expected sell (avg of the 6 open/close) = {sell_price:.2f}",
+        f"Buy = {buy_price:.2f}      Limit sell target (avg of the 6 open/close) = {sell_limit:.2f}",
     ]
-    return "\n".join(lines), sell_price
+    realized = None
+    if true_horizon_ohlc is not None:
+        low, high = true_horizon_ohlc[:, 2], true_horizon_ohlc[:, 1]
+        hit = bool(((low <= sell_limit) & (sell_limit <= high)).any())
+        realized_price = sell_limit if hit else float(true_horizon_ohlc[2, 3])
+        realized_return = (realized_price / buy_price - 1.0) * 100
+        realized = (realized_price, hit)
+        status = "HIT -> filled at target" if hit else "MISSED -> forced exit at real C3 close"
+        lines.append(
+            f"vs. real price action: {status}  |  realized sell = {realized_price:.2f}  |  "
+            f"return = {realized_return:+.2f}%"
+        )
+    return "\n".join(lines), sell_limit, realized
 
 
-def render_panel(fig, gs_chart, gs_text, sub_df: pd.DataFrame, buy_price: float, title: str) -> None:
+def render_panel(
+    fig, gs_chart, gs_text, sub_df: pd.DataFrame, buy_price: float, title: str, true_horizon_ohlc: np.ndarray | None = None
+) -> None:
     ax = fig.add_subplot(gs_chart)
     mpf.plot(sub_df, type="candle", ax=ax, style="yahoo", volume=False)
     ax.set_title(title, fontsize=10)
@@ -335,8 +395,8 @@ def render_panel(fig, gs_chart, gs_text, sub_df: pd.DataFrame, buy_price: float,
     draw_horizon_box(ax, len(sub_df))
 
     ohlc = sub_df.iloc[-HORIZON:][["open", "high", "low", "close"]].to_numpy()
-    text, sell_price = trade_table_text(ohlc, buy_price)
-    mark_trade(ax, len(sub_df), buy_price, sell_price)
+    text, sell_limit, realized = trade_table_text(ohlc, buy_price, true_horizon_ohlc)
+    mark_trade(ax, len(sub_df), buy_price, sell_limit, realized)
 
     ax_txt = fig.add_subplot(gs_text)
     ax_txt.axis("off")
@@ -349,8 +409,11 @@ def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, devi
     3 candlestick panels: ground truth (left), PatchTST's generated horizon candles
     (top right), CVAE's generated horizon candles from one sampled draw (bottom right).
     Each panel gets a red box around the generated/predicted 3 candles, a buy-price line
-    (close of the last known candle) and a sell-price dot (expected exit price), plus a
-    per-candle open/close + buy/sell text table underneath."""
+    (close of the last known candle) and a limit-order target dot (expected exit price),
+    plus a per-candle open/close + buy/target text table underneath. The PatchTST and CVAE
+    panels additionally report whether that model's limit order would actually have filled
+    against the REAL price action (see limit_order_exit), with a "forced exit" marker/line
+    when it wouldn't have."""
     from src.data_pipeline import CONTEXT_LENGTHS, build_window
 
     out_dir = Path(args.plots_dir)
@@ -394,12 +457,14 @@ def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, devi
         cvae_df = true_df.copy()
         cvae_df.loc[cvae_df.index[-3:], ohlc_cols] = cvae_ohlc
 
+        true_horizon_ohlc = true_df.iloc[-HORIZON:][["open", "high", "low", "close"]].to_numpy()
+
         fig = plt.figure(figsize=(16, 8))
         outer = fig.add_gridspec(6, 2, width_ratios=[1, 1], hspace=0.7, wspace=0.25)
 
         render_panel(fig, outer[0:4, 0], outer[4:6, 0], true_df, buy_price, "Ground truth")
-        render_panel(fig, outer[0:2, 1], outer[2, 1], pt_df, buy_price, "PatchTST generated")
-        render_panel(fig, outer[3:5, 1], outer[5, 1], cvae_df, buy_price, "CVAE generated (1 draw)")
+        render_panel(fig, outer[0:2, 1], outer[2, 1], pt_df, buy_price, "PatchTST generated", true_horizon_ohlc)
+        render_panel(fig, outer[3:5, 1], outer[5, 1], cvae_df, buy_price, "CVAE generated (1 draw)", true_horizon_ohlc)
 
         fig.suptitle(f"{context_bucket(ctx_bars)} ctx (ctx_bars={ctx_bars}, start_idx={start_idx})")
         out_path = out_dir / f"sample{i}_start{start_idx}_ctx{ctx_bars}.png"
