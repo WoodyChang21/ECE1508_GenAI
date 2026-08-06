@@ -62,21 +62,28 @@ def candle_oc(candle: list[float]) -> str:
     return f"{candle[0]:.2f} / {candle[3]:.2f}"
 
 
-def target_price(candles: list[list[float]]) -> float:
-    """Mean of the 3 bars' 6 open/close values -- same formula as exit_price_from_components,
-    computed here directly from the recorded candles so the Ground truth row's reference
-    'target price' column doesn't need its own field in samples.json."""
-    vals = [c[0] for c in candles] + [c[3] for c in candles]
-    return sum(vals) / len(vals)
+OUTCOME_LABEL = {"take_profit": "TAKE PROFIT", "stop_loss": "STOP LOSS", "expired": "EXPIRED"}
 
 
 def vs_real_cell(model: dict) -> str:
-    status = "**HIT**" if model["hit"] else "**MISSED**"
+    """No trade was entered, so there's no bracket order to have resolved."""
+    if not model["would_enter"]:
+        return "—"
+    status = f"**{OUTCOME_LABEL[model['outcome']]}**"
     return f"{status} → sell {model['realized_price']:.2f} ({fmt_signed_bold_pct_value(model['realized_return_pct'])})"
 
 
 def trade_decision_cell(model: dict) -> str:
     return "**ENTER**" if model["would_enter"] else "**NO TRADE**"
+
+
+def ground_truth_vs_real_cell(gt: dict, buy: float) -> str:
+    """Ground truth has no predicted target/entry decision to hit or miss, so its
+    'vs. real price' cell instead reports a buy-and-hold benchmark: sell at candle 3's
+    real close, the same forced-close price a MISSED trade would have used."""
+    close = gt["candles"][2][3]
+    pct = (close - buy) / buy * 100
+    return f"**BENCHMARK** → sell {close:.2f} ({fmt_signed_bold_pct_value(pct)})"
 
 
 def sample_section(s: dict) -> str:
@@ -89,16 +96,17 @@ def sample_section(s: dict) -> str:
         f"![sample{s['index']}](outputs/sample_plots/{s['file']})",
         "",
         "| | Candle 1 (open / close) | Candle 2 (open / close) | Candle 3 (open / close) | "
-        "Buy price | Target price | Trade? | vs. real price |",
-        "|---|---|---|---|---|---|---|---|",
+        "Buy price | Take-profit | Stop-loss | Trade? | vs. real price |",
+        "|---|---|---|---|---|---|---|---|---|",
         f"| Ground truth | {candle_oc(gt['candles'][0])} | {candle_oc(gt['candles'][1])} | "
-        f"{candle_oc(gt['candles'][2])} | {buy:.2f} | {target_price(gt['candles']):.2f} | — | — |",
+        f"{candle_oc(gt['candles'][2])} | {buy:.2f} | — | — | — | "
+        f"{ground_truth_vs_real_cell(gt, buy)} |",
         f"| PatchTST | {candle_oc(pt['candles'][0])} | {candle_oc(pt['candles'][1])} | "
-        f"{candle_oc(pt['candles'][2])} | {buy:.2f} | {pt['sell_limit']:.2f} | {trade_decision_cell(pt)} | "
-        f"{vs_real_cell(pt)} |",
+        f"{candle_oc(pt['candles'][2])} | {buy:.2f} | {pt['sell_limit']:.2f} | {pt['stop_loss']:.2f} | "
+        f"{trade_decision_cell(pt)} | {vs_real_cell(pt)} |",
         f"| CVAE | {candle_oc(cvae['candles'][0])} | {candle_oc(cvae['candles'][1])} | "
-        f"{candle_oc(cvae['candles'][2])} | {buy:.2f} | {cvae['sell_limit']:.2f} | {trade_decision_cell(cvae)} | "
-        f"{vs_real_cell(cvae)} |",
+        f"{candle_oc(cvae['candles'][2])} | {buy:.2f} | {cvae['sell_limit']:.2f} | {cvae['stop_loss']:.2f} | "
+        f"{trade_decision_cell(cvae)} | {vs_real_cell(cvae)} |",
     ])
 
 
@@ -107,12 +115,12 @@ def results_samples_block(samples: list[dict]) -> str:
 
 
 def hit_status(model: dict) -> str:
-    """NO TRADE takes priority over hit/miss -- a model whose own target sits below buy
-    never has a limit order placed in the first place, so whether it would have filled
-    is moot."""
+    """NO TRADE takes priority over the outcome -- a model whose own target sits below
+    buy never has a bracket order placed in the first place, so how it would have
+    resolved is moot."""
     if not model["would_enter"]:
         return "NO TRADE"
-    return "HIT" if model["hit"] else "MISSED"
+    return OUTCOME_LABEL[model["outcome"]]
 
 
 def hit_summary_block(samples: list[dict]) -> str:
@@ -134,20 +142,31 @@ def spread_summary_block(samples: list[dict]) -> str:
 
 def backtest_row(row: dict) -> str:
     if row["win_rate"] is None:
-        return f"| {row['threshold']} | {row['n_trades']} | — | — | — | — |"
+        return f"| {row['threshold']} | {row['n_trades']} | — | — | — | — | — |"
     return (
         f"| {row['threshold']} | {row['n_trades']} | {fmt_plain_pct(row['win_rate'], 1)} | "
-        f"{fmt_plain_pct(row['limit_hit_rate'], 1)} | {fmt_signed_pct_fraction(row['avg_return'], 3)} | "
-        f"{fmt_signed_pct_fraction(row['total_return'], 2)} |"
+        f"{fmt_plain_pct(row['take_profit_rate'], 1)} | {fmt_plain_pct(row['stop_loss_rate'], 1)} | "
+        f"{fmt_signed_pct_fraction(row['avg_return'], 3)} | {fmt_signed_pct_fraction(row['total_return'], 2)} |"
     )
+
+
+def buy_hold_block(bh: dict) -> str:
+    lines = [
+        "| Entry (date / price) | Exit (date / price) | Elapsed | Total return | Annualized return |",
+        "|---|---|---|---|---|",
+        f"| {bh['entry_date']} / {bh['entry_price']:.2f} | {bh['exit_date']} / {bh['exit_price']:.2f} | "
+        f"{bh['elapsed_years']:.2f} yr | {fmt_signed_pct_fraction(bh['total_return'], 2)} | "
+        f"{fmt_signed_pct_fraction(bh['annual_return'], 2)} |",
+    ]
+    return "\n".join(lines)
 
 
 def backtest_table(rows: list[dict]) -> str:
     header = (
-        "| Confidence threshold | Trades taken | Win rate | Limit hit rate | "
+        "| Confidence threshold | Trades taken | Win rate | Take-profit rate | Stop-loss rate | "
         "Avg. return per trade | Total return |"
     )
-    sep = "|---|---|---|---|---|---|"
+    sep = "|---|---|---|---|---|---|---|"
     return "\n".join([header, sep] + [backtest_row(r) for r in rows])
 
 
@@ -173,6 +192,7 @@ def main() -> None:
         "spread-summary": spread_summary_block(samples),
         "backtest-patchtst": backtest_table(metrics["overall"]["backtest"]["patchtst"]),
         "backtest-cvae": backtest_table(metrics["overall"]["backtest"]["cvae"]),
+        "buy-hold-benchmark": buy_hold_block(metrics["overall"]["backtest"]["buy_and_hold"]),
     }
 
     doc_path = Path(args.doc)

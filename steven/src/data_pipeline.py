@@ -368,6 +368,19 @@ def exit_price_from_components(components: np.ndarray, close_0) -> np.ndarray:
     return ohlc[..., [0, 3]].mean(axis=(-2, -1))  # mean of open(idx0) & close(idx3), all 3 bars
 
 
+def max_close_from_components(components: np.ndarray, close_0) -> np.ndarray:
+    """components: (..., 3, 4) [open_ret, body_ret, upper_wick, lower_wick] per horizon
+    bar. close_0: scalar or (...) matching components' leading batch dims.
+
+    Exit price = the highest of the 3 bars' own predicted close prices -- a simpler,
+    more aggressive stand-in than exit_price_from_components's 6-value average; used as
+    PatchTST's take-profit target (a single point forecast, so "aim near the best close
+    it predicted" is as far as a benchmark rule can reasonably go without a distribution
+    to draw a quantile from). Returns (...,)."""
+    ohlc = reconstruct_prices(components, close_0)  # (..., 3, 4): open,high,low,close
+    return ohlc[..., 3].max(axis=-1)  # max close (idx3) across the 3 bars
+
+
 def per_bar_close_return(components: np.ndarray) -> np.ndarray:
     """components: (..., 3, 4). Returns (..., 3): close_0-anchored close return
     (open_ret + body_ret) per horizon bar -- used to check directional coherence."""

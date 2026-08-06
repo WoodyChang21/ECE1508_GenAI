@@ -34,6 +34,7 @@ from src.data_pipeline import (
     context_bucket,
     exit_price_from_components,
     extract_arrays,
+    max_close_from_components,
     per_bar_close_return,
     reconstruct_prices,
     reconstruct_volume,
@@ -67,6 +68,15 @@ def parse_args() -> argparse.Namespace:
         help="Percentile (over train data) of |close_0-anchored log return| used to shrink predicted "
         "price components -- a tighter, empirically-calibrated bound on top of the model's own "
         "MAX_LOG_RETURN, applied to metrics/backtest/plots alike. See train_exit_return_bound.",
+    )
+    p.add_argument(
+        "--cvae-sell-quantile", type=float, default=70.0,
+        help="Percentile (over the K sampled draws' own predicted exit prices) used as CVAE's "
+        "take-profit target, instead of their mean -- higher = a more aggressive target (wider "
+        "profit gap, lower expected chance of filling before the 3-candle order expires). CVAE "
+        "actually has a sampled distribution to pick a target from; PatchTST doesn't (single point "
+        "forecast), so it uses the max of its 3 predicted closes instead (see "
+        "max_close_from_components).",
     )
     p.add_argument("--batch-size", type=int, default=256)
     # default 0: benchmarked in steven/configs/patchtst.yaml -- DataLoader multiprocessing
@@ -200,11 +210,14 @@ def metrics_for_slice(true_y, pt_y, cvae_y, close_0, stats) -> dict:
 # ---------------------------------------------------------------------------
 # Long-only selective backtest
 #
-# Entry is always close_0 (real, known). Exit (for realized PnL) is the mean of the
-# 3 horizon bars' real open+close prices -- a simple deterministic stand-in for "some
-# reasonable fill within the window" rather than a specific exit-timing rule. Each
-# model's own confidence score decides which windows are worth trading at all; the
-# realized return used for PnL always comes from ground truth, never predictions.
+# Entry is always close_0 (real, known). Exit is a 1:1 risk-reward bracket order: a
+# take-profit limit sell above entry, and a stop-loss the same price distance below
+# entry (see mirrored_stop_loss), placed at the same time as entry. The 3 real horizon
+# bars are walked in order (see bracket_order_exit); whichever level is touched first
+# ends the trade there, and if neither ever is, the position is force-closed at the 3rd
+# bar's real close. Each model's own confidence score decides which windows are worth
+# trading at all; the realized return used for PnL always comes from ground truth,
+# never predictions.
 # ---------------------------------------------------------------------------
 
 
@@ -250,29 +263,68 @@ def patchtst_confidence_scores(pt_price: np.ndarray, close_0: np.ndarray) -> np.
     return confidence
 
 
-def limit_order_exit(true_ohlc: np.ndarray, sell_limit: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Simulates placing a limit sell order at sell_limit (the model's own predicted exit
-    price) at the same time as the close_0 buy, then walking the 3 REAL horizon bars in
-    order: if any bar's real [low,high] range reaches sell_limit, the order fills there (a
-    "hit"); if none of the 3 bars ever reach it, the position is force-closed at the 3rd
-    bar's real close instead. true_ohlc: (N,3,4) real [open,high,low,close]. sell_limit:
-    (N,). Returns (realized_sell_price (N,), hit (N,) bool)."""
+def mirrored_stop_loss(buy_price, take_profit):
+    """1:1 risk-reward bracket: the stop-loss sits the same price distance below entry
+    as the take-profit sits above it (2*buy_price - take_profit). Works elementwise for
+    both scalars and arrays."""
+    return 2 * np.asarray(buy_price) - np.asarray(take_profit)
+
+
+def bracket_order_exit(
+    true_ohlc: np.ndarray, take_profit: np.ndarray, stop_loss: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Simulates a 1:1 risk-reward bracket order -- a take-profit limit sell and a
+    mirrored stop-loss (see mirrored_stop_loss), both placed at the same time as the
+    close_0 buy. Walks the 3 REAL horizon bars in order; the first bar whose real
+    [low,high] range touches either level ends the trade there. If a single bar's range
+    spans both levels, the stop-loss is assumed to trigger first -- OHLC bars carry no
+    intrabar sequencing, so we can't know which was actually touched first, and assuming
+    the favorable order would make the backtest optimistic in a way real trading can't
+    rely on. If neither level is ever touched across all 3 bars, the position is
+    force-closed at the 3rd bar's real close instead (order expiry). true_ohlc: (N,3,4)
+    real [open,high,low,close]. take_profit, stop_loss: (N,). Returns
+    (realized_sell_price (N,), hit_take_profit (N,) bool, hit_stop_loss (N,) bool) -- at
+    most one of the two hit arrays is True per row; neither is True on expiry."""
+    n = true_ohlc.shape[0]
     low = true_ohlc[:, :, 2]
     high = true_ohlc[:, :, 1]
-    reachable = (low <= sell_limit[:, None]) & (sell_limit[:, None] <= high)  # (N,3)
-    hit = reachable.any(axis=1)
-    forced_close = true_ohlc[:, 2, 3]  # 3rd horizon bar's real close
-    sell_price = np.where(hit, sell_limit, forced_close)
-    return sell_price, hit
+
+    sell_price = true_ohlc[:, HORIZON - 1, 3].copy()  # default: last horizon bar's real close
+    hit_take_profit = np.zeros(n, dtype=bool)
+    hit_stop_loss = np.zeros(n, dtype=bool)
+    resolved = np.zeros(n, dtype=bool)
+
+    for bar in range(HORIZON):
+        tp_touch = (~resolved) & (low[:, bar] <= take_profit) & (take_profit <= high[:, bar])
+        sl_touch = (~resolved) & (low[:, bar] <= stop_loss) & (stop_loss <= high[:, bar])
+
+        stop_wins = sl_touch  # pessimistic tie-break: stop-loss wins whenever both are touched
+        profit_wins = tp_touch & ~sl_touch
+
+        sell_price[stop_wins] = stop_loss[stop_wins]
+        hit_stop_loss[stop_wins] = True
+        sell_price[profit_wins] = take_profit[profit_wins]
+        hit_take_profit[profit_wins] = True
+
+        resolved |= tp_touch | sl_touch
+
+    return sell_price, hit_take_profit, hit_stop_loss
 
 
 def sweep_thresholds(
-    confidence: np.ndarray, trade_return: np.ndarray, thresholds: list[float], hit: np.ndarray | None = None
+    confidence: np.ndarray, trade_return: np.ndarray, thresholds: list[float],
+    hit_take_profit: np.ndarray | None = None, hit_stop_loss: np.ndarray | None = None,
+    eligible: np.ndarray | None = None,
 ) -> list[dict]:
+    """eligible, if given, is an (N,) bool mask ANDed into every threshold's selection --
+    used to hard-exclude windows whose own predicted take-profit doesn't even clear the
+    buy price (see run_backtest), regardless of how high their confidence score is."""
     n = len(confidence)
     rows = []
     for th in thresholds:
         mask = confidence >= th
+        if eligible is not None:
+            mask = mask & eligible
         k = int(mask.sum())
         row = {"threshold": th, "n_trades": k, "selectivity": (k / n) if n else 0.0}
         if k > 0:
@@ -280,28 +332,64 @@ def sweep_thresholds(
             row["win_rate"] = float((rets > 0).mean())
             row["avg_return"] = float(rets.mean())
             row["total_return"] = float(rets.sum())
-            row["limit_hit_rate"] = float(hit[mask].mean()) if hit is not None else None
+            row["take_profit_rate"] = float(hit_take_profit[mask].mean()) if hit_take_profit is not None else None
+            row["stop_loss_rate"] = float(hit_stop_loss[mask].mean()) if hit_stop_loss is not None else None
         else:
             row["win_rate"] = None
             row["avg_return"] = None
             row["total_return"] = None
-            row["limit_hit_rate"] = None
+            row["take_profit_rate"] = None
+            row["stop_loss_rate"] = None
         rows.append(row)
     return rows
 
 
-def run_backtest(true_y: np.ndarray, pt_y: np.ndarray, cvae_y: np.ndarray, close_0: np.ndarray) -> dict:
+def buy_and_hold_benchmark(df: pd.DataFrame, bounds: dict) -> dict:
+    """Naive baseline for the backtest below: buy SPY at the test period's first close,
+    hold to its last close -- no model, no confidence threshold, no trade selectivity.
+    Something to compare the model-driven total/annualized returns against."""
+    test_lo, test_hi = bounds["test"]
+    entry, exit_ = df.iloc[test_lo], df.iloc[test_hi - 1]
+    entry_price, exit_price = float(entry["close"]), float(exit_["close"])
+    total_return = exit_price / entry_price - 1.0
+    elapsed_years = (exit_["datetime"] - entry["datetime"]).days / 365.25
+    annual_return = (1.0 + total_return) ** (1.0 / elapsed_years) - 1.0
+    return {
+        "entry_date": str(entry["datetime"].date()),
+        "entry_price": entry_price,
+        "exit_date": str(exit_["datetime"].date()),
+        "exit_price": exit_price,
+        "elapsed_years": elapsed_years,
+        "total_return": total_return,
+        "annual_return": annual_return,
+    }
+
+
+def run_backtest(
+    true_y: np.ndarray, pt_y: np.ndarray, cvae_y: np.ndarray, close_0: np.ndarray,
+    cvae_sell_quantile: float = 70.0,
+) -> dict:
     """true_y/pt_y: (N,15). cvae_y: (K,N,15). close_0: (N,)."""
     n = len(true_y)
     note = (
-        "long-only limit-order backtest: entry=close_0 (real). Each model's own predicted "
-        "exit price (mean of its predicted 3 horizon bars' open+close; for CVAE, averaged "
-        "across the k sampled draws) is placed as a limit sell order at the same time as "
-        "entry. If any of the 3 REAL horizon bars' [low,high] range reaches that price, "
-        "the order fills there; otherwise the position is force-closed at the 3rd REAL "
-        "bar's close instead. confidence (per model) decides which windows to trade. "
-        "total_return is summed across selected trades -- test windows are independently "
-        "sampled and can overlap in calendar time, so this is not a sequential equity curve."
+        "long-only bracket-order backtest: entry=close_0 (real). Each model's own "
+        "predicted take-profit price is placed as a limit sell order at the same time as "
+        "entry, with a mirrored 1:1 stop-loss the same price distance below entry (see "
+        "mirrored_stop_loss). PatchTST's take-profit is the max of its predicted 3 "
+        "horizon bars' own closes (single point forecast, no distribution to draw a "
+        f"quantile from -- see max_close_from_components); CVAE's is the "
+        f"p{cvae_sell_quantile:.0f} percentile of its K sampled draws' own predicted exit "
+        "prices, since CVAE actually has a sampled distribution to pick a target from. A "
+        "window is only ever eligible to trade if its own take-profit clears the buy "
+        "price (2*buy_price-take_profit would put the mirrored stop-loss above entry "
+        "otherwise, which makes no sense for a long) -- confidence alone can't override "
+        "this. The 3 REAL horizon bars are then walked in order (see bracket_order_exit): "
+        "whichever level is touched first ends the trade there; if a bar's range spans "
+        "both, the stop-loss is assumed to trigger first (pessimistic tie-break, since "
+        "OHLC bars don't record intrabar order); if neither is ever touched, the position "
+        "is force-closed at the 3rd REAL bar's close (order expiry). total_return is "
+        "summed across selected trades -- test windows are independently sampled and can "
+        "overlap in calendar time, so this is not a sequential equity curve."
     )
     if n == 0:
         return {"note": note, "patchtst": [], "cvae": []}
@@ -312,11 +400,15 @@ def run_backtest(true_y: np.ndarray, pt_y: np.ndarray, cvae_y: np.ndarray, close
 
     true_ohlc = reconstruct_prices(true_price, close_0)  # (N,3,4) real [open,high,low,close]
 
-    pt_sell_limit = exit_price_from_components(pt_price, close_0)  # (N,)
-    cvae_sell_limit = exit_price_from_components(cvae_price_samples, close_0).mean(axis=0)  # (N,)
+    pt_take_profit = max_close_from_components(pt_price, close_0)  # (N,)
+    cvae_exit_prices = exit_price_from_components(cvae_price_samples, close_0)  # (K,N)
+    cvae_take_profit = np.percentile(cvae_exit_prices, cvae_sell_quantile, axis=0)  # (N,)
 
-    pt_sell_price, pt_hit = limit_order_exit(true_ohlc, pt_sell_limit)
-    cvae_sell_price, cvae_hit = limit_order_exit(true_ohlc, cvae_sell_limit)
+    pt_stop_loss = mirrored_stop_loss(close_0, pt_take_profit)
+    cvae_stop_loss = mirrored_stop_loss(close_0, cvae_take_profit)
+
+    pt_sell_price, pt_hit_tp, pt_hit_sl = bracket_order_exit(true_ohlc, pt_take_profit, pt_stop_loss)
+    cvae_sell_price, cvae_hit_tp, cvae_hit_sl = bracket_order_exit(true_ohlc, cvae_take_profit, cvae_stop_loss)
 
     pt_trade_return = pt_sell_price / close_0 - 1.0
     cvae_trade_return = cvae_sell_price / close_0 - 1.0
@@ -324,10 +416,17 @@ def run_backtest(true_y: np.ndarray, pt_y: np.ndarray, cvae_y: np.ndarray, close
     cvae_conf = cvae_confidence_scores(cvae_price_samples, close_0)
     pt_conf = patchtst_confidence_scores(pt_price, close_0)
 
+    pt_eligible = pt_take_profit > close_0
+    cvae_eligible = cvae_take_profit > close_0
+
     return {
         "note": note,
-        "patchtst": sweep_thresholds(pt_conf, pt_trade_return, BACKTEST_THRESHOLDS, pt_hit),
-        "cvae": sweep_thresholds(cvae_conf, cvae_trade_return, BACKTEST_THRESHOLDS, cvae_hit),
+        "patchtst": sweep_thresholds(
+            pt_conf, pt_trade_return, BACKTEST_THRESHOLDS, pt_hit_tp, pt_hit_sl, pt_eligible
+        ),
+        "cvae": sweep_thresholds(
+            cvae_conf, cvae_trade_return, BACKTEST_THRESHOLDS, cvae_hit_tp, cvae_hit_sl, cvae_eligible
+        ),
     }
 
 
@@ -341,17 +440,19 @@ def draw_horizon_box(ax, n_shown: int) -> None:
 
 
 def draw_trade_lines(
-    ax, n_shown: int, buy_price: float, sell_targets: list[tuple[str, float, str]]
+    ax, n_shown: int, buy_price: float, sell_targets: list[tuple[str, float, str, str]]
 ) -> None:
     """Buy = dashed line at close_0 (the last known candle's close), spanning the full
-    panel. Each entry in sell_targets is (label, price, color): a limit-sell price drawn
-    as a horizontal line starting at the left edge of the horizon box (the first of the
-    3 target/generated candles) and extending to the right edge of the panel -- not a
-    line all the way through, since the price only applies once prediction starts. If a
-    sell price falls outside the panel's current y-range, the line is pinned just inside
-    the top/bottom edge instead of letting the axis autoscale to it, with a text label
-    giving the real price and noting it's out of range -- this keeps the panel's own
-    price scale intact regardless of how extreme a prediction is."""
+    panel. Each entry in sell_targets is (label, price, color, linestyle): a
+    take-profit/stop-loss price drawn as a horizontal line starting at the left edge of
+    the horizon box (the first of the 3 target/generated candles) and extending to the
+    right edge of the panel -- not a line all the way through, since the price only
+    applies once prediction starts. Solid = take-profit, dashed = the mirrored
+    stop-loss, by convention of the linestyle each caller passes in. If a price falls
+    outside the panel's current y-range, the line is pinned just inside the top/bottom
+    edge instead of letting the axis autoscale to it, with a text label giving the real
+    price and noting it's out of range -- this keeps the panel's own price scale intact
+    regardless of how extreme a prediction is."""
     y0, y1 = ax.get_ylim()
     x0 = n_shown - HORIZON - 0.5
     x1 = n_shown - 0.5
@@ -360,23 +461,23 @@ def draw_trade_lines(
     ax.axhline(buy_price, color="tab:blue", linestyle="--", linewidth=1, zorder=6)
     ax.text(-0.6, buy_price, "buy", color="tab:blue", fontsize=7, va="bottom", ha="left", zorder=6)
 
-    for label, price, color in sell_targets:
+    for label, price, color, linestyle in sell_targets:
         if price > y1:
             line_y = y1 - margin
-            ax.hlines(line_y, x0, x1, color=color, linewidth=1.4, zorder=7)
+            ax.hlines(line_y, x0, x1, color=color, linestyle=linestyle, linewidth=1.4, zorder=7)
             ax.annotate(
                 f"  {label}: {price:.2f} (above range)", xy=(x0, line_y), xytext=(0, -4),
                 textcoords="offset points", color=color, fontsize=7, va="top", ha="left", zorder=7,
             )
         elif price < y0:
             line_y = y0 + margin
-            ax.hlines(line_y, x0, x1, color=color, linewidth=1.4, zorder=7)
+            ax.hlines(line_y, x0, x1, color=color, linestyle=linestyle, linewidth=1.4, zorder=7)
             ax.annotate(
                 f"  {label}: {price:.2f} (below range)", xy=(x0, line_y), xytext=(0, 4),
                 textcoords="offset points", color=color, fontsize=7, va="bottom", ha="left", zorder=7,
             )
         else:
-            ax.hlines(price, x0, x1, color=color, linewidth=1.4, zorder=7)
+            ax.hlines(price, x0, x1, color=color, linestyle=linestyle, linewidth=1.4, zorder=7)
             # Label sits past the right edge, not at x0 -- anchoring it at x0 (inside the
             # horizon box) used to overlap the candles it's drawn on top of, especially
             # when the target sits close to the buy price.
@@ -386,43 +487,57 @@ def draw_trade_lines(
 
 
 def trade_table_text(
-    ohlc: np.ndarray, buy_price: float, true_horizon_ohlc: np.ndarray | None = None
-) -> tuple[str, float, tuple[float, bool] | None, bool | None]:
+    ohlc: np.ndarray, buy_price: float, sell_limit: float | None = None,
+    true_horizon_ohlc: np.ndarray | None = None,
+) -> tuple[str, tuple[float, str] | None, bool | None]:
     """ohlc: (3,4) [open,high,low,close] for this panel's 3 horizon bars (used for the
-    per-candle numbers and to set the limit-order target price). true_horizon_ohlc, if
-    given, is the REAL 3 horizon bars' [open,high,low,close] -- used to simulate whether
-    the limit order set from `ohlc` would actually have filled against real price action
-    (see limit_order_exit), and marks this as a model panel (vs. the ground truth panel,
-    which has no trade decision of its own to report). Returns (annotation text,
-    sell_limit, realized-or-None, would_enter-or-None) -- would_enter is
-    sell_limit > buy_price, i.e. whether this model's own predicted target even clears
-    the entry price; the long-only strategy would skip the trade entirely otherwise,
-    regardless of confidence."""
-    sell_limit = float(ohlc[:, [0, 3]].mean())
+    per-candle numbers in the text table -- always shown, even for the ground truth
+    panel, which passes sell_limit=None since it has no trade decision of its own).
+    sell_limit: this model's own predicted take-profit price, already computed by the
+    caller (max-predicted-close for PatchTST, quantile-based for CVAE -- see
+    run_backtest/make_plots); the mirrored 1:1 stop-loss (see mirrored_stop_loss) is
+    derived from it here. true_horizon_ohlc, if given, is the REAL 3 horizon bars'
+    [open,high,low,close] -- used to walk the bracket order (see bracket_order_exit)
+    against real price action. Returns (annotation text, (realized_price,
+    outcome)-or-None, would_enter-or-None) -- would_enter is sell_limit > buy_price, i.e.
+    whether this model's own predicted target even clears the entry price; the
+    long-only strategy would skip the trade entirely otherwise, regardless of
+    confidence. outcome is one of "take_profit", "stop_loss", "expired"."""
     lines = [
         f"C1  O={ohlc[0,0]:.2f}  C={ohlc[0,3]:.2f}    "
         f"C2  O={ohlc[1,0]:.2f}  C={ohlc[1,3]:.2f}    "
         f"C3  O={ohlc[2,0]:.2f}  C={ohlc[2,3]:.2f}",
-        f"Buy = {buy_price:.2f}      Limit sell target (avg of the 6 open/close) = {sell_limit:.2f}",
     ]
     realized = None
     would_enter = None
-    if true_horizon_ohlc is not None:
+    if sell_limit is not None:
+        stop_loss = float(mirrored_stop_loss(buy_price, sell_limit))
+        lines.append(
+            f"Buy = {buy_price:.2f}   Take-profit = {sell_limit:.2f}   "
+            f"Stop-loss = {stop_loss:.2f} (1:1 mirrored)"
+        )
         would_enter = sell_limit > buy_price
         decision = "ENTER long (target > buy)" if would_enter else "NO TRADE (target <= buy -- no expected upside)"
         lines.append(f"Trade decision: {decision}")
 
-        low, high = true_horizon_ohlc[:, 2], true_horizon_ohlc[:, 1]
-        hit = bool(((low <= sell_limit) & (sell_limit <= high)).any())
-        realized_price = sell_limit if hit else float(true_horizon_ohlc[2, 3])
-        realized_return = (realized_price / buy_price - 1.0) * 100
-        realized = (realized_price, hit)
-        status = "HIT -> filled at target" if hit else "MISSED -> forced exit at real C3 close"
-        lines.append(
-            f"vs. real price action: {status}  |  realized sell = {realized_price:.2f}  |  "
-            f"return = {realized_return:+.2f}%"
-        )
-    return "\n".join(lines), sell_limit, realized, would_enter
+        if true_horizon_ohlc is not None:
+            sell_price, hit_tp, hit_sl = bracket_order_exit(
+                true_horizon_ohlc[None, :, :], np.array([sell_limit]), np.array([stop_loss])
+            )
+            realized_price = float(sell_price[0])
+            outcome = "take_profit" if hit_tp[0] else ("stop_loss" if hit_sl[0] else "expired")
+            realized_return = (realized_price / buy_price - 1.0) * 100
+            realized = (realized_price, outcome)
+            status = {
+                "take_profit": "TAKE PROFIT -> filled at target",
+                "stop_loss": "STOP LOSS -> filled at stop",
+                "expired": "EXPIRED -> forced exit at real C3 close",
+            }[outcome]
+            lines.append(
+                f"vs. real price action: {status}  |  realized sell = {realized_price:.2f}  |  "
+                f"return = {realized_return:+.2f}%"
+            )
+    return "\n".join(lines), realized, would_enter
 
 
 def render_panel(
@@ -432,14 +547,16 @@ def render_panel(
     sub_df: pd.DataFrame,
     buy_price: float,
     title: str,
-    sell_targets: list[tuple[str, float, str]],
+    sell_targets: list[tuple[str, float, str, str]],
     true_horizon_ohlc: np.ndarray | None = None,
-) -> tuple[float, tuple[float, bool] | None, bool | None]:
-    """Returns (sell_limit, realized, would_enter) from trade_table_text -- realized is
-    (realized_price, hit) when true_horizon_ohlc was given, else None; would_enter is
-    likewise None for the ground truth panel (no model decision to report there) -- so
-    callers that need these (e.g. to log them alongside the plot) don't have to
-    recompute them."""
+    sell_limit: float | None = None,
+) -> tuple[tuple[float, str] | None, bool | None]:
+    """sell_limit is this model's own predicted take-profit price (already computed by
+    the caller -- None for the ground truth panel, which has no trade decision of its
+    own). Returns (realized, would_enter) from trade_table_text -- realized is
+    (realized_price, outcome) when true_horizon_ohlc was given, else None; would_enter is
+    likewise None for the ground truth panel -- so callers that need these (e.g. to log
+    them alongside the plot) don't have to recompute them."""
     ax = fig.add_subplot(gs_chart)
     mpf.plot(sub_df, type="candle", ax=ax, style="yahoo", volume=False)
     ax.set_title(title, fontsize=10)
@@ -447,7 +564,7 @@ def render_panel(
     draw_horizon_box(ax, len(sub_df))
 
     ohlc = sub_df.iloc[-HORIZON:][["open", "high", "low", "close"]].to_numpy()
-    text, sell_limit, realized, would_enter = trade_table_text(ohlc, buy_price, true_horizon_ohlc)
+    text, realized, would_enter = trade_table_text(ohlc, buy_price, sell_limit, true_horizon_ohlc)
     draw_trade_lines(ax, len(sub_df), buy_price, sell_targets)
 
     if would_enter is not None:
@@ -462,30 +579,33 @@ def render_panel(
     ax_txt = fig.add_subplot(gs_text)
     ax_txt.axis("off")
     ax_txt.text(0.0, 1.0, text, transform=ax_txt.transAxes, ha="left", va="top", fontsize=7.5, family="monospace")
-    return sell_limit, realized, would_enter
+    return realized, would_enter
 
 
 def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, device, sell_bound):
     """Draws num_plot_samples fresh random (start_idx, ctx_bars) windows -- NOT the
     fixed/seeded eval test_pairs -- so each run's sample plots differ. Each figure has
-    3 candlestick panels: ground truth (left), PatchTST's generated horizon candles
-    (top right), CVAE's generated horizon candles from one sampled draw (bottom right).
-    Each model's predicted price components are shrunk toward sell_bound (see
+    3 candlestick panels: ground truth (left), PatchTST's generated horizon candles (top
+    right), CVAE's generated horizon candles from one of its K sampled draws (bottom
+    right) -- the other K-1 draws are generated too, just to compute CVAE's quantile
+    take-profit target (see run_backtest), not rendered as candles themselves. Each
+    model's predicted price components are shrunk toward sell_bound (see
     train_exit_return_bound/shrink_components in main) before reconstruction, so the
     plotted candles and lines match the same recalibrated prediction used in metrics and
     the backtest. Each panel gets a red box around the generated/predicted 3 candles, a
-    dashed buy-price line (close of the last known candle), and one limit-sell line per
-    model (its own predicted exit price) starting at the left edge of that box and
-    running to the panel's right edge -- the ground truth panel shows both models' lines
-    together for comparison, while the PatchTST/CVAE panels each show only their own. A
-    line pinned outside the panel's y-range is drawn just inside the edge instead,
-    annotated with its real price, so one wild prediction can't blow out the axis scale.
-    The PatchTST and CVAE panels additionally report in the text table whether that
-    model's limit order would actually have filled against the REAL price action (see
-    limit_order_exit). Also writes samples.json alongside the PNGs -- the same per-sample
-    numbers (candles, buy/sell prices, hit/realized outcome, spread), structured for
-    update_report.py to regenerate v1.md's Results tables without transcribing PNGs by
-    hand."""
+    dashed buy-price line, and a solid take-profit / dashed stop-loss line per model
+    (its own predicted take-profit, and the mirrored 1:1 stop-loss -- see
+    mirrored_stop_loss) starting at the left edge of that box and running to the panel's
+    right edge -- the ground truth panel shows both models' lines together for
+    comparison, while the PatchTST/CVAE panels each show only their own. A line pinned
+    outside the panel's y-range is drawn just inside the edge instead, annotated with its
+    real price, so one wild prediction can't blow out the axis scale. The PatchTST and
+    CVAE panels additionally report in the text table whether that model's bracket order
+    actually took profit, got stopped out, or expired against the REAL price action (see
+    bracket_order_exit). Also writes samples.json alongside the PNGs -- the same
+    per-sample numbers (candles, buy/take-profit/stop-loss prices, outcome, spread),
+    structured for update_report.py to regenerate v1.md's Results tables without
+    transcribing PNGs by hand."""
     from src.data_pipeline import CONTEXT_LENGTHS, build_window
 
     out_dir = Path(args.plots_dir)
@@ -525,15 +645,20 @@ def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, devi
 
         with torch.no_grad():
             pt_price, _ = patchtst(context_t, patch_pad_t)
-            cvae_price, _ = cvae.sample(masked_tensor, k=1)  # one generated draw, not the mean
+            # K draws: draw 0 is rendered as the candlestick path, all K feed the quantile target
+            cvae_price, _ = cvae.sample(masked_tensor, k=args.num_samples)
 
         pt_components = shrink_components(pt_price[0].cpu().numpy(), sell_bound)  # (3,4)
-        cvae_components = shrink_components(cvae_price[0, 0].cpu().numpy(), sell_bound)  # (3,4)
+        cvae_draws = shrink_components(cvae_price[:, 0].cpu().numpy(), sell_bound)  # (K,3,4)
+        cvae_components = cvae_draws[0]  # (3,4) -- the one path actually drawn as candles
         pt_ohlc = reconstruct_prices(pt_components, w["close_0"])  # (3,4)
         cvae_ohlc = reconstruct_prices(cvae_components, w["close_0"])  # (3,4)
         buy_price = float(w["close_0"])
-        pt_sell_limit = float(pt_ohlc[:, [0, 3]].mean())
-        cvae_sell_limit = float(cvae_ohlc[:, [0, 3]].mean())
+        pt_take_profit = float(pt_ohlc[:, 3].max())
+        cvae_exit_prices = exit_price_from_components(cvae_draws, w["close_0"])  # (K,)
+        cvae_take_profit = float(np.percentile(cvae_exit_prices, args.cvae_sell_quantile))
+        pt_stop_loss = float(mirrored_stop_loss(buy_price, pt_take_profit))
+        cvae_stop_loss = float(mirrored_stop_loss(buy_price, cvae_take_profit))
 
         ctx_tail = min(ctx_bars, 20)
         hz_start = start_idx + ctx_bars
@@ -552,15 +677,22 @@ def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, devi
 
         render_panel(
             fig, outer[0:4, 0], outer[4:6, 0], true_df, buy_price, "Ground truth",
-            sell_targets=[("PatchTST", pt_sell_limit, "tab:orange"), ("CVAE", cvae_sell_limit, "tab:green")],
+            sell_targets=[
+                ("PatchTST TP", pt_take_profit, "tab:orange", "-"),
+                ("PatchTST SL", pt_stop_loss, "tab:orange", "--"),
+                ("CVAE TP", cvae_take_profit, "tab:green", "-"),
+                ("CVAE SL", cvae_stop_loss, "tab:green", "--"),
+            ],
         )
-        _, pt_realized, pt_would_enter = render_panel(
+        pt_realized, pt_would_enter = render_panel(
             fig, outer[0:2, 1], outer[2, 1], pt_df, buy_price, "PatchTST generated",
-            sell_targets=[("PatchTST", pt_sell_limit, "tab:orange")], true_horizon_ohlc=true_horizon_ohlc,
+            sell_targets=[("PatchTST TP", pt_take_profit, "tab:orange", "-"), ("PatchTST SL", pt_stop_loss, "tab:orange", "--")],
+            true_horizon_ohlc=true_horizon_ohlc, sell_limit=pt_take_profit,
         )
-        _, cvae_realized, cvae_would_enter = render_panel(
+        cvae_realized, cvae_would_enter = render_panel(
             fig, outer[3:5, 1], outer[5, 1], cvae_df, buy_price, "CVAE generated (1 draw)",
-            sell_targets=[("CVAE", cvae_sell_limit, "tab:green")], true_horizon_ohlc=true_horizon_ohlc,
+            sell_targets=[("CVAE TP", cvae_take_profit, "tab:green", "-"), ("CVAE SL", cvae_stop_loss, "tab:green", "--")],
+            true_horizon_ohlc=true_horizon_ohlc, sell_limit=cvae_take_profit,
         )
 
         fig.suptitle(f"{context_bucket(ctx_bars)} ctx (ctx_bars={ctx_bars}, start_idx={start_idx})")
@@ -569,8 +701,8 @@ def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, devi
         plt.close(fig)
         plotted += 1
 
-        pt_realized_price, pt_hit = pt_realized
-        cvae_realized_price, cvae_hit = cvae_realized
+        pt_realized_price, pt_outcome = pt_realized
+        cvae_realized_price, cvae_outcome = cvae_realized
         records.append({
             "index": i,
             "file": out_path.name,
@@ -582,18 +714,20 @@ def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, devi
             "patchtst": {
                 "candles": pt_ohlc.tolist(),
                 "spread": spread(pt_ohlc),
-                "sell_limit": pt_sell_limit,
+                "sell_limit": pt_take_profit,
+                "stop_loss": pt_stop_loss,
                 "would_enter": pt_would_enter,
-                "hit": pt_hit,
+                "outcome": pt_outcome,
                 "realized_price": pt_realized_price,
                 "realized_return_pct": (pt_realized_price / buy_price - 1.0) * 100,
             },
             "cvae": {
                 "candles": cvae_ohlc.tolist(),
                 "spread": spread(cvae_ohlc),
-                "sell_limit": cvae_sell_limit,
+                "sell_limit": cvae_take_profit,
+                "stop_loss": cvae_stop_loss,
                 "would_enter": cvae_would_enter,
-                "hit": cvae_hit,
+                "outcome": cvae_outcome,
                 "realized_price": cvae_realized_price,
                 "realized_return_pct": (cvae_realized_price / buy_price - 1.0) * 100,
             },
@@ -659,7 +793,8 @@ def main() -> None:
     cvae_y[..., :12] = shrink_components(cvae_y[..., :12].reshape(k, n, 3, 4), sell_bound).reshape(k, n, 12)
 
     results = {"overall": metrics_for_slice(true_y, pt_y, cvae_y, close_0, stats)}
-    results["overall"]["backtest"] = run_backtest(true_y, pt_y, cvae_y, close_0)
+    results["overall"]["backtest"] = run_backtest(true_y, pt_y, cvae_y, close_0, args.cvae_sell_quantile)
+    results["overall"]["backtest"]["buy_and_hold"] = buy_and_hold_benchmark(df, bounds)
 
     buckets = np.array([context_bucket(c) for c in ctx_bars])
     for bucket in BUCKETS:
@@ -668,7 +803,7 @@ def main() -> None:
             true_y[mask], pt_y[mask], cvae_y[:, mask], close_0[mask], stats
         )
         results[bucket]["backtest"] = run_backtest(
-            true_y[mask], pt_y[mask], cvae_y[:, mask], close_0[mask]
+            true_y[mask], pt_y[mask], cvae_y[:, mask], close_0[mask], args.cvae_sell_quantile
         )
 
     Path(args.metrics_out).parent.mkdir(parents=True, exist_ok=True)

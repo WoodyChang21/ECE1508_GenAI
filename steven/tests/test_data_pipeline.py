@@ -243,6 +243,38 @@ def test_exit_price_from_components_batched():
     np.testing.assert_allclose(batched, individual, rtol=1e-6)
 
 
+def test_max_close_from_components_matches_manual_max():
+    raw = _make_synthetic_ohlcv(n_days=20, seed=12)
+    feat_df = _featurize_and_normalize(raw)
+    feat, opens, closes = dp.extract_arrays(feat_df)
+
+    start_idx, ctx_bars = 5, 21
+    window = dp.build_window(feat, opens, closes, start_idx, ctx_bars)
+    price_components = window["y"][:12].reshape(3, 4)
+
+    take_profit = dp.max_close_from_components(price_components, window["close_0"])
+
+    hz_start = start_idx + ctx_bars
+    true_closes = feat_df.iloc[hz_start : hz_start + 3]["close"].to_numpy()
+    np.testing.assert_allclose(take_profit, true_closes.max(), rtol=1e-5)
+
+
+def test_max_close_from_components_batched():
+    raw = _make_synthetic_ohlcv(n_days=20, seed=13)
+    feat_df = _featurize_and_normalize(raw)
+    feat, opens, closes = dp.extract_arrays(feat_df)
+
+    windows = [dp.build_window(feat, opens, closes, i, 14) for i in (0, 5, 10)]
+    components = np.stack([w["y"][:12].reshape(3, 4) for w in windows])
+    close_0 = np.array([w["close_0"] for w in windows])
+
+    batched = dp.max_close_from_components(components, close_0)
+    individual = np.array(
+        [dp.max_close_from_components(c, c0) for c, c0 in zip(components, close_0)]
+    )
+    np.testing.assert_allclose(batched, individual, rtol=1e-6)
+
+
 def test_per_bar_close_return_sign_matches_open_close_direction():
     raw = _make_synthetic_ohlcv(n_days=20, seed=9)
     feat_df = _featurize_and_normalize(raw)
@@ -261,3 +293,55 @@ def test_per_bar_close_return_sign_matches_open_close_direction():
     expected_sign = np.sign(true_closes - close_0)
 
     np.testing.assert_array_equal(np.sign(close_ret), expected_sign)
+
+
+# ---------------------------------------------------------------------------
+# Post-hoc recalibration
+# ---------------------------------------------------------------------------
+
+
+def test_train_exit_return_bound_matches_manual_percentile():
+    raw = _make_synthetic_ohlcv(n_days=30, seed=10)
+    feat_df = _featurize_and_normalize(raw)
+    _, opens, closes = dp.extract_arrays(feat_df)
+
+    lo, hi = 0, len(closes)
+    bound = dp.train_exit_return_bound(opens, closes, (lo, hi), percentile=99.0)
+
+    anchors = np.arange(lo + 1, hi - dp.HORIZON + 1)
+    close_0 = closes[anchors - 1]
+    horizon_idx = anchors[:, None] + np.arange(dp.HORIZON)[None, :]
+    open_ret = np.log(opens[horizon_idx] / close_0[:, None])
+    close_ret = np.log(closes[horizon_idx] / close_0[:, None])
+    pooled = np.abs(np.concatenate([open_ret, close_ret], axis=1))
+    expected = float(np.percentile(pooled, 99.0))
+
+    assert bound == pytest.approx(expected)
+    assert bound > 0
+
+
+def test_train_exit_return_bound_raises_when_range_too_narrow():
+    with pytest.raises(ValueError):
+        dp.train_exit_return_bound(np.ones(10), np.ones(10), (0, dp.HORIZON), percentile=99.0)
+
+
+def test_shrink_components_preserves_small_values_and_bounds_large_ones():
+    bound = 0.01
+    small = np.full((3, 4), bound / 100)  # << bound: tanh(x/b)*b ~= x, ~unchanged
+    shrunk_small = dp.shrink_components(small, bound)
+    np.testing.assert_allclose(shrunk_small, small, rtol=1e-2)
+
+    large = np.full((3, 4), bound * 100)  # >> bound: squashed toward +-bound (tanh saturates)
+    shrunk_large = dp.shrink_components(large, bound)
+    assert np.all(np.abs(shrunk_large) <= bound)
+    assert np.all(np.abs(shrunk_large) > bound * 0.9)
+
+
+def test_shrink_components_shape_and_sign_preserved():
+    rng = np.random.default_rng(11)
+    components = rng.normal(scale=0.02, size=(5, 3, 4))
+    bound = 0.015
+
+    shrunk = dp.shrink_components(components, bound)
+    assert shrunk.shape == components.shape
+    np.testing.assert_array_equal(np.sign(shrunk), np.sign(components))
