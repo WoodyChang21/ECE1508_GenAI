@@ -75,6 +75,10 @@ def vs_real_cell(model: dict) -> str:
     return f"{status} → sell {model['realized_price']:.2f} ({fmt_signed_bold_pct_value(model['realized_return_pct'])})"
 
 
+def trade_decision_cell(model: dict) -> str:
+    return "**ENTER**" if model["would_enter"] else "**NO TRADE**"
+
+
 def sample_section(s: dict) -> str:
     gt, pt, cvae = s["ground_truth"], s["patchtst"], s["cvae"]
     buy = s["buy_price"]
@@ -85,14 +89,16 @@ def sample_section(s: dict) -> str:
         f"![sample{s['index']}](outputs/sample_plots/{s['file']})",
         "",
         "| | Candle 1 (open / close) | Candle 2 (open / close) | Candle 3 (open / close) | "
-        "Buy price | Target price | vs. real price |",
-        "|---|---|---|---|---|---|---|",
+        "Buy price | Target price | Trade? | vs. real price |",
+        "|---|---|---|---|---|---|---|---|",
         f"| Ground truth | {candle_oc(gt['candles'][0])} | {candle_oc(gt['candles'][1])} | "
-        f"{candle_oc(gt['candles'][2])} | {buy:.2f} | {target_price(gt['candles']):.2f} | — |",
+        f"{candle_oc(gt['candles'][2])} | {buy:.2f} | {target_price(gt['candles']):.2f} | — | — |",
         f"| PatchTST | {candle_oc(pt['candles'][0])} | {candle_oc(pt['candles'][1])} | "
-        f"{candle_oc(pt['candles'][2])} | {buy:.2f} | {pt['sell_limit']:.2f} | {vs_real_cell(pt)} |",
+        f"{candle_oc(pt['candles'][2])} | {buy:.2f} | {pt['sell_limit']:.2f} | {trade_decision_cell(pt)} | "
+        f"{vs_real_cell(pt)} |",
         f"| CVAE | {candle_oc(cvae['candles'][0])} | {candle_oc(cvae['candles'][1])} | "
-        f"{candle_oc(cvae['candles'][2])} | {buy:.2f} | {cvae['sell_limit']:.2f} | {vs_real_cell(cvae)} |",
+        f"{candle_oc(cvae['candles'][2])} | {buy:.2f} | {cvae['sell_limit']:.2f} | {trade_decision_cell(cvae)} | "
+        f"{vs_real_cell(cvae)} |",
     ])
 
 
@@ -100,12 +106,19 @@ def results_samples_block(samples: list[dict]) -> str:
     return "\n\n".join(sample_section(s) for s in samples)
 
 
+def hit_status(model: dict) -> str:
+    """NO TRADE takes priority over hit/miss -- a model whose own target sits below buy
+    never has a limit order placed in the first place, so whether it would have filled
+    is moot."""
+    if not model["would_enter"]:
+        return "NO TRADE"
+    return "HIT" if model["hit"] else "MISSED"
+
+
 def hit_summary_block(samples: list[dict]) -> str:
     lines = ["| Sample | PatchTST | CVAE |", "|---|---|---|"]
     for s in samples:
-        pt_status = "HIT" if s["patchtst"]["hit"] else "MISSED"
-        cvae_status = "HIT" if s["cvae"]["hit"] else "MISSED"
-        lines.append(f"| {s['index']} | {pt_status} | {cvae_status} |")
+        lines.append(f"| {s['index']} | {hit_status(s['patchtst'])} | {hit_status(s['cvae'])} |")
     return "\n".join(lines)
 
 

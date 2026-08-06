@@ -377,19 +377,27 @@ def draw_trade_lines(
             )
         else:
             ax.hlines(price, x0, x1, color=color, linewidth=1.4, zorder=7)
-            ax.text(x0, price, f"  {label}: {price:.2f}", color=color, fontsize=7, va="bottom", ha="left", zorder=7)
+            # Label sits past the right edge, not at x0 -- anchoring it at x0 (inside the
+            # horizon box) used to overlap the candles it's drawn on top of, especially
+            # when the target sits close to the buy price.
+            ax.text(x1 + 0.3, price, f"{label}: {price:.2f}", color=color, fontsize=7, va="bottom", ha="left", zorder=7)
 
     ax.set_ylim(y0, y1)
 
 
 def trade_table_text(
     ohlc: np.ndarray, buy_price: float, true_horizon_ohlc: np.ndarray | None = None
-) -> tuple[str, float, tuple[float, bool] | None]:
+) -> tuple[str, float, tuple[float, bool] | None, bool | None]:
     """ohlc: (3,4) [open,high,low,close] for this panel's 3 horizon bars (used for the
     per-candle numbers and to set the limit-order target price). true_horizon_ohlc, if
     given, is the REAL 3 horizon bars' [open,high,low,close] -- used to simulate whether
     the limit order set from `ohlc` would actually have filled against real price action
-    (see limit_order_exit). Returns (annotation text, sell_limit, realized-or-None)."""
+    (see limit_order_exit), and marks this as a model panel (vs. the ground truth panel,
+    which has no trade decision of its own to report). Returns (annotation text,
+    sell_limit, realized-or-None, would_enter-or-None) -- would_enter is
+    sell_limit > buy_price, i.e. whether this model's own predicted target even clears
+    the entry price; the long-only strategy would skip the trade entirely otherwise,
+    regardless of confidence."""
     sell_limit = float(ohlc[:, [0, 3]].mean())
     lines = [
         f"C1  O={ohlc[0,0]:.2f}  C={ohlc[0,3]:.2f}    "
@@ -398,7 +406,12 @@ def trade_table_text(
         f"Buy = {buy_price:.2f}      Limit sell target (avg of the 6 open/close) = {sell_limit:.2f}",
     ]
     realized = None
+    would_enter = None
     if true_horizon_ohlc is not None:
+        would_enter = sell_limit > buy_price
+        decision = "ENTER long (target > buy)" if would_enter else "NO TRADE (target <= buy -- no expected upside)"
+        lines.append(f"Trade decision: {decision}")
+
         low, high = true_horizon_ohlc[:, 2], true_horizon_ohlc[:, 1]
         hit = bool(((low <= sell_limit) & (sell_limit <= high)).any())
         realized_price = sell_limit if hit else float(true_horizon_ohlc[2, 3])
@@ -409,7 +422,7 @@ def trade_table_text(
             f"vs. real price action: {status}  |  realized sell = {realized_price:.2f}  |  "
             f"return = {realized_return:+.2f}%"
         )
-    return "\n".join(lines), sell_limit, realized
+    return "\n".join(lines), sell_limit, realized, would_enter
 
 
 def render_panel(
@@ -421,11 +434,12 @@ def render_panel(
     title: str,
     sell_targets: list[tuple[str, float, str]],
     true_horizon_ohlc: np.ndarray | None = None,
-) -> tuple[float, tuple[float, bool] | None]:
-    """Returns (sell_limit, realized) from trade_table_text -- realized is
-    (realized_price, hit) when true_horizon_ohlc was given, else None -- so callers that
-    need the simulated outcome (e.g. to log it alongside the plot) don't have to
-    recompute it."""
+) -> tuple[float, tuple[float, bool] | None, bool | None]:
+    """Returns (sell_limit, realized, would_enter) from trade_table_text -- realized is
+    (realized_price, hit) when true_horizon_ohlc was given, else None; would_enter is
+    likewise None for the ground truth panel (no model decision to report there) -- so
+    callers that need these (e.g. to log them alongside the plot) don't have to
+    recompute them."""
     ax = fig.add_subplot(gs_chart)
     mpf.plot(sub_df, type="candle", ax=ax, style="yahoo", volume=False)
     ax.set_title(title, fontsize=10)
@@ -433,13 +447,22 @@ def render_panel(
     draw_horizon_box(ax, len(sub_df))
 
     ohlc = sub_df.iloc[-HORIZON:][["open", "high", "low", "close"]].to_numpy()
-    text, sell_limit, realized = trade_table_text(ohlc, buy_price, true_horizon_ohlc)
+    text, sell_limit, realized, would_enter = trade_table_text(ohlc, buy_price, true_horizon_ohlc)
     draw_trade_lines(ax, len(sub_df), buy_price, sell_targets)
+
+    if would_enter is not None:
+        label = "ENTER LONG" if would_enter else "NO TRADE"
+        color = "tab:green" if would_enter else "tab:red"
+        ax.text(
+            0.02, 0.97, label, transform=ax.transAxes, ha="left", va="top", fontsize=10,
+            fontweight="bold", color=color, zorder=9,
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor=color, alpha=0.9),
+        )
 
     ax_txt = fig.add_subplot(gs_text)
     ax_txt.axis("off")
     ax_txt.text(0.0, 1.0, text, transform=ax_txt.transAxes, ha="left", va="top", fontsize=7.5, family="monospace")
-    return sell_limit, realized
+    return sell_limit, realized, would_enter
 
 
 def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, device, sell_bound):
@@ -531,11 +554,11 @@ def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, devi
             fig, outer[0:4, 0], outer[4:6, 0], true_df, buy_price, "Ground truth",
             sell_targets=[("PatchTST", pt_sell_limit, "tab:orange"), ("CVAE", cvae_sell_limit, "tab:green")],
         )
-        _, pt_realized = render_panel(
+        _, pt_realized, pt_would_enter = render_panel(
             fig, outer[0:2, 1], outer[2, 1], pt_df, buy_price, "PatchTST generated",
             sell_targets=[("PatchTST", pt_sell_limit, "tab:orange")], true_horizon_ohlc=true_horizon_ohlc,
         )
-        _, cvae_realized = render_panel(
+        _, cvae_realized, cvae_would_enter = render_panel(
             fig, outer[3:5, 1], outer[5, 1], cvae_df, buy_price, "CVAE generated (1 draw)",
             sell_targets=[("CVAE", cvae_sell_limit, "tab:green")], true_horizon_ohlc=true_horizon_ohlc,
         )
@@ -560,6 +583,7 @@ def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, devi
                 "candles": pt_ohlc.tolist(),
                 "spread": spread(pt_ohlc),
                 "sell_limit": pt_sell_limit,
+                "would_enter": pt_would_enter,
                 "hit": pt_hit,
                 "realized_price": pt_realized_price,
                 "realized_return_pct": (pt_realized_price / buy_price - 1.0) * 100,
@@ -568,6 +592,7 @@ def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, devi
                 "candles": cvae_ohlc.tolist(),
                 "spread": spread(cvae_ohlc),
                 "sell_limit": cvae_sell_limit,
+                "would_enter": cvae_would_enter,
                 "hit": cvae_hit,
                 "realized_price": cvae_realized_price,
                 "realized_return_pct": (cvae_realized_price / buy_price - 1.0) * 100,
