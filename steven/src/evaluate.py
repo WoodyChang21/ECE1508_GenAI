@@ -75,8 +75,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-samples", type=int, default=5)
     p.add_argument("--num-plot-samples", type=int, default=5)
     p.add_argument("--device", type=str, default="auto")
-    p.add_argument("--metrics-out", type=str, default="steven/outputs/metrics.json")
-    p.add_argument("--plots-dir", type=str, default="steven/outputs/sample_plots")
+    p.add_argument(
+        "--metrics-out", type=str, default=None,
+        help="Defaults to steven/outputs/metrics<suffix>.json, where <suffix> is derived from "
+        "--patchtst-checkpoint's filename (see derive_output_suffix) -- e.g. "
+        "patchtst_false_checkpoint.pt -> metrics_false.json. Pass explicitly to override.",
+    )
+    p.add_argument(
+        "--plots-dir", type=str, default=None,
+        help="Defaults to steven/outputs/sample_plots<suffix>, same <suffix> derivation as "
+        "--metrics-out. Pass explicitly to override.",
+    )
     p.add_argument("--seed", type=int, default=123)
     p.add_argument(
         "--sell-bound-percentile", type=float, default=99.0,
@@ -108,6 +117,21 @@ def resolve_device(name: str) -> torch.device:
             return torch.device("mps")
         return torch.device("cpu")
     return torch.device(name)
+
+
+def derive_output_suffix(patchtst_checkpoint_path: str) -> str:
+    """'.../patchtst_checkpoint.pt' -> '', '.../patchtst_false_checkpoint.pt' -> '_false',
+    '.../patchtst_true_checkpoint.pt' -> '_true' -- the middle token between 'patchtst_' and
+    '_checkpoint' in the filename stem. Used to default --metrics-out/--plots-dir to
+    per-checkpoint paths (metrics_false.json, sample_plots_true/, etc.) so evaluating
+    different checkpoints doesn't overwrite each other's results. Any checkpoint filename
+    not matching the 'patchtst[_X]_checkpoint.pt' pattern falls back to no suffix."""
+    stem = Path(patchtst_checkpoint_path).stem  # e.g. 'patchtst_false_checkpoint'
+    prefix, suffix_literal = "patchtst_", "_checkpoint"
+    if stem.startswith(prefix) and stem.endswith(suffix_literal) and len(stem) >= len(prefix) + len(suffix_literal):
+        middle = stem[len(prefix):-len(suffix_literal)]
+        return f"_{middle}" if middle else ""
+    return ""
 
 
 def detect_patchtst_arch(model_cfg: dict) -> str:
@@ -794,6 +818,17 @@ def make_plots(df, feat, opens, closes, patchtst, arch, cvae, test_sampler, args
 
 def main() -> None:
     args = parse_args()
+
+    # Auto-derive per-checkpoint output paths (see derive_output_suffix) unless the caller
+    # explicitly overrode --metrics-out/--plots-dir -- keeps results from different
+    # checkpoints (original, channel_attention True/False) from overwriting each other.
+    suffix = derive_output_suffix(args.patchtst_checkpoint)
+    if args.metrics_out is None:
+        args.metrics_out = f"steven/outputs/metrics{suffix}.json"
+    if args.plots_dir is None:
+        args.plots_dir = f"steven/outputs/sample_plots{suffix}"
+    logger.info("metrics-out: %s, plots-dir: %s", args.metrics_out, args.plots_dir)
+
     device = resolve_device(args.device)
     logger.info("device: %s", device)
 
