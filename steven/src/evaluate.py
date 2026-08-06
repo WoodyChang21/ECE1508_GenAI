@@ -37,7 +37,9 @@ from src.data_pipeline import (
     per_bar_close_return,
     reconstruct_prices,
     reconstruct_volume,
+    shrink_components,
     to_patchtst_input,
+    train_exit_return_bound,
 )
 from src.models.cvae_inpainting import CVAEInpainting
 from src.models.patchtst import PatchTST
@@ -60,6 +62,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--metrics-out", type=str, default="steven/outputs/metrics.json")
     p.add_argument("--plots-dir", type=str, default="steven/outputs/sample_plots")
     p.add_argument("--seed", type=int, default=123)
+    p.add_argument(
+        "--sell-bound-percentile", type=float, default=99.0,
+        help="Percentile (over train data) of |close_0-anchored log return| used to shrink predicted "
+        "price components -- a tighter, empirically-calibrated bound on top of the model's own "
+        "MAX_LOG_RETURN, applied to metrics/backtest/plots alike. See train_exit_return_bound.",
+    )
     p.add_argument("--batch-size", type=int, default=256)
     # default 0: benchmarked in steven/configs/patchtst.yaml -- DataLoader multiprocessing
     # is slower here, not faster, since build_window() is cheap numpy per sample.
@@ -332,27 +340,46 @@ def draw_horizon_box(ax, n_shown: int) -> None:
     )
 
 
-def mark_trade(
-    ax, n_shown: int, buy_price: float, sell_limit: float, realized: tuple[float, bool] | None = None
+def draw_trade_lines(
+    ax, n_shown: int, buy_price: float, sell_targets: list[tuple[str, float, str]]
 ) -> None:
-    """Buy = dashed line at close_0 (the last known candle's close). Target = a dot at the
-    limit-order price (mean of the 3 horizon bars' open+close), centered in the box. If
-    realized is given (realized_sell_price, hit) and the limit was missed, also marks
-    where the position was actually force-closed (the 3rd real horizon bar's close)."""
+    """Buy = dashed line at close_0 (the last known candle's close), spanning the full
+    panel. Each entry in sell_targets is (label, price, color): a limit-sell price drawn
+    as a horizontal line starting at the left edge of the horizon box (the first of the
+    3 target/generated candles) and extending to the right edge of the panel -- not a
+    line all the way through, since the price only applies once prediction starts. If a
+    sell price falls outside the panel's current y-range, the line is pinned just inside
+    the top/bottom edge instead of letting the axis autoscale to it, with a text label
+    giving the real price and noting it's out of range -- this keeps the panel's own
+    price scale intact regardless of how extreme a prediction is."""
+    y0, y1 = ax.get_ylim()
+    x0 = n_shown - HORIZON - 0.5
+    x1 = n_shown - 0.5
+    margin = (y1 - y0) * 0.08
+
     ax.axhline(buy_price, color="tab:blue", linestyle="--", linewidth=1, zorder=6)
     ax.text(-0.6, buy_price, "buy", color="tab:blue", fontsize=7, va="bottom", ha="left", zorder=6)
-    target_x = n_shown - HORIZON / 2 - 0.5
-    ax.scatter([target_x], [sell_limit], color="purple", edgecolors="black", s=45, zorder=7)
-    ax.text(target_x, sell_limit, "  target", color="purple", fontsize=7, va="center", ha="left", zorder=7)
 
-    if realized is not None:
-        realized_price, hit = realized
-        if not hit:
-            exit_x = n_shown - 1  # 3rd (last) horizon candle
-            ax.scatter([exit_x], [realized_price], color="black", marker="x", s=55, zorder=8)
-            ax.text(
-                exit_x, realized_price, "  forced exit", color="black", fontsize=7, va="top", ha="left", zorder=8
+    for label, price, color in sell_targets:
+        if price > y1:
+            line_y = y1 - margin
+            ax.hlines(line_y, x0, x1, color=color, linewidth=1.4, zorder=7)
+            ax.annotate(
+                f"  {label}: {price:.2f} (above range)", xy=(x0, line_y), xytext=(0, -4),
+                textcoords="offset points", color=color, fontsize=7, va="top", ha="left", zorder=7,
             )
+        elif price < y0:
+            line_y = y0 + margin
+            ax.hlines(line_y, x0, x1, color=color, linewidth=1.4, zorder=7)
+            ax.annotate(
+                f"  {label}: {price:.2f} (below range)", xy=(x0, line_y), xytext=(0, 4),
+                textcoords="offset points", color=color, fontsize=7, va="bottom", ha="left", zorder=7,
+            )
+        else:
+            ax.hlines(price, x0, x1, color=color, linewidth=1.4, zorder=7)
+            ax.text(x0, price, f"  {label}: {price:.2f}", color=color, fontsize=7, va="bottom", ha="left", zorder=7)
+
+    ax.set_ylim(y0, y1)
 
 
 def trade_table_text(
@@ -386,8 +413,19 @@ def trade_table_text(
 
 
 def render_panel(
-    fig, gs_chart, gs_text, sub_df: pd.DataFrame, buy_price: float, title: str, true_horizon_ohlc: np.ndarray | None = None
-) -> None:
+    fig,
+    gs_chart,
+    gs_text,
+    sub_df: pd.DataFrame,
+    buy_price: float,
+    title: str,
+    sell_targets: list[tuple[str, float, str]],
+    true_horizon_ohlc: np.ndarray | None = None,
+) -> tuple[float, tuple[float, bool] | None]:
+    """Returns (sell_limit, realized) from trade_table_text -- realized is
+    (realized_price, hit) when true_horizon_ohlc was given, else None -- so callers that
+    need the simulated outcome (e.g. to log it alongside the plot) don't have to
+    recompute it."""
     ax = fig.add_subplot(gs_chart)
     mpf.plot(sub_df, type="candle", ax=ax, style="yahoo", volume=False)
     ax.set_title(title, fontsize=10)
@@ -396,34 +434,57 @@ def render_panel(
 
     ohlc = sub_df.iloc[-HORIZON:][["open", "high", "low", "close"]].to_numpy()
     text, sell_limit, realized = trade_table_text(ohlc, buy_price, true_horizon_ohlc)
-    mark_trade(ax, len(sub_df), buy_price, sell_limit, realized)
+    draw_trade_lines(ax, len(sub_df), buy_price, sell_targets)
 
     ax_txt = fig.add_subplot(gs_text)
     ax_txt.axis("off")
     ax_txt.text(0.0, 1.0, text, transform=ax_txt.transAxes, ha="left", va="top", fontsize=7.5, family="monospace")
+    return sell_limit, realized
 
 
-def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, device):
+def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, device, sell_bound):
     """Draws num_plot_samples fresh random (start_idx, ctx_bars) windows -- NOT the
     fixed/seeded eval test_pairs -- so each run's sample plots differ. Each figure has
     3 candlestick panels: ground truth (left), PatchTST's generated horizon candles
     (top right), CVAE's generated horizon candles from one sampled draw (bottom right).
-    Each panel gets a red box around the generated/predicted 3 candles, a buy-price line
-    (close of the last known candle) and a limit-order target dot (expected exit price),
-    plus a per-candle open/close + buy/target text table underneath. The PatchTST and CVAE
-    panels additionally report whether that model's limit order would actually have filled
-    against the REAL price action (see limit_order_exit), with a "forced exit" marker/line
-    when it wouldn't have."""
+    Each model's predicted price components are shrunk toward sell_bound (see
+    train_exit_return_bound/shrink_components in main) before reconstruction, so the
+    plotted candles and lines match the same recalibrated prediction used in metrics and
+    the backtest. Each panel gets a red box around the generated/predicted 3 candles, a
+    dashed buy-price line (close of the last known candle), and one limit-sell line per
+    model (its own predicted exit price) starting at the left edge of that box and
+    running to the panel's right edge -- the ground truth panel shows both models' lines
+    together for comparison, while the PatchTST/CVAE panels each show only their own. A
+    line pinned outside the panel's y-range is drawn just inside the edge instead,
+    annotated with its real price, so one wild prediction can't blow out the axis scale.
+    The PatchTST and CVAE panels additionally report in the text table whether that
+    model's limit order would actually have filled against the REAL price action (see
+    limit_order_exit). Also writes samples.json alongside the PNGs -- the same per-sample
+    numbers (candles, buy/sell prices, hit/realized outcome, spread), structured for
+    update_report.py to regenerate v1.md's Results tables without transcribing PNGs by
+    hand."""
     from src.data_pipeline import CONTEXT_LENGTHS, build_window
 
     out_dir = Path(args.plots_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Clear last run's PNGs/samples.json first -- these are illustrative, regenerated
+    # fresh every run, and update_report.py rewrites v1.md to reference only the current
+    # batch, so a stale prior run's files would otherwise just accumulate unreferenced.
+    for stale in out_dir.glob("sample*_start*_ctx*.png"):
+        stale.unlink()
+    (out_dir / "samples.json").unlink(missing_ok=True)
 
     # Fresh entropy each call -- intentionally independent of the fixed eval seed, since
     # these are illustrative samples, not part of the reproducible metrics.
     rng = np.random.default_rng()
     ohlc_cols = ["open", "high", "low", "close"]
 
+    def spread(ohlc: np.ndarray) -> float:
+        """max - min of the 3 bars' 6 open/close values -- how wide a candle path is."""
+        return float(ohlc[:, [0, 3]].max() - ohlc[:, [0, 3]].min())
+
+    records = []
     plotted = 0
     for i in range(args.num_plot_samples):
         ctx_bars = int(rng.choice(CONTEXT_LENGTHS))
@@ -443,9 +504,13 @@ def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, devi
             pt_price, _ = patchtst(context_t, patch_pad_t)
             cvae_price, _ = cvae.sample(masked_tensor, k=1)  # one generated draw, not the mean
 
-        pt_ohlc = reconstruct_prices(pt_price[0].cpu().numpy(), w["close_0"])  # (3,4)
-        cvae_ohlc = reconstruct_prices(cvae_price[0, 0].cpu().numpy(), w["close_0"])  # (3,4)
+        pt_components = shrink_components(pt_price[0].cpu().numpy(), sell_bound)  # (3,4)
+        cvae_components = shrink_components(cvae_price[0, 0].cpu().numpy(), sell_bound)  # (3,4)
+        pt_ohlc = reconstruct_prices(pt_components, w["close_0"])  # (3,4)
+        cvae_ohlc = reconstruct_prices(cvae_components, w["close_0"])  # (3,4)
         buy_price = float(w["close_0"])
+        pt_sell_limit = float(pt_ohlc[:, [0, 3]].mean())
+        cvae_sell_limit = float(cvae_ohlc[:, [0, 3]].mean())
 
         ctx_tail = min(ctx_bars, 20)
         hz_start = start_idx + ctx_bars
@@ -462,16 +527,58 @@ def make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, devi
         fig = plt.figure(figsize=(16, 8))
         outer = fig.add_gridspec(6, 2, width_ratios=[1, 1], hspace=0.7, wspace=0.25)
 
-        render_panel(fig, outer[0:4, 0], outer[4:6, 0], true_df, buy_price, "Ground truth")
-        render_panel(fig, outer[0:2, 1], outer[2, 1], pt_df, buy_price, "PatchTST generated", true_horizon_ohlc)
-        render_panel(fig, outer[3:5, 1], outer[5, 1], cvae_df, buy_price, "CVAE generated (1 draw)", true_horizon_ohlc)
+        render_panel(
+            fig, outer[0:4, 0], outer[4:6, 0], true_df, buy_price, "Ground truth",
+            sell_targets=[("PatchTST", pt_sell_limit, "tab:orange"), ("CVAE", cvae_sell_limit, "tab:green")],
+        )
+        _, pt_realized = render_panel(
+            fig, outer[0:2, 1], outer[2, 1], pt_df, buy_price, "PatchTST generated",
+            sell_targets=[("PatchTST", pt_sell_limit, "tab:orange")], true_horizon_ohlc=true_horizon_ohlc,
+        )
+        _, cvae_realized = render_panel(
+            fig, outer[3:5, 1], outer[5, 1], cvae_df, buy_price, "CVAE generated (1 draw)",
+            sell_targets=[("CVAE", cvae_sell_limit, "tab:green")], true_horizon_ohlc=true_horizon_ohlc,
+        )
 
         fig.suptitle(f"{context_bucket(ctx_bars)} ctx (ctx_bars={ctx_bars}, start_idx={start_idx})")
         out_path = out_dir / f"sample{i}_start{start_idx}_ctx{ctx_bars}.png"
         fig.savefig(out_path, bbox_inches="tight")
         plt.close(fig)
         plotted += 1
+
+        pt_realized_price, pt_hit = pt_realized
+        cvae_realized_price, cvae_hit = cvae_realized
+        records.append({
+            "index": i,
+            "file": out_path.name,
+            "bucket": context_bucket(ctx_bars),
+            "ctx_bars": ctx_bars,
+            "start_idx": start_idx,
+            "buy_price": buy_price,
+            "ground_truth": {"candles": true_horizon_ohlc.tolist(), "spread": spread(true_horizon_ohlc)},
+            "patchtst": {
+                "candles": pt_ohlc.tolist(),
+                "spread": spread(pt_ohlc),
+                "sell_limit": pt_sell_limit,
+                "hit": pt_hit,
+                "realized_price": pt_realized_price,
+                "realized_return_pct": (pt_realized_price / buy_price - 1.0) * 100,
+            },
+            "cvae": {
+                "candles": cvae_ohlc.tolist(),
+                "spread": spread(cvae_ohlc),
+                "sell_limit": cvae_sell_limit,
+                "hit": cvae_hit,
+                "realized_price": cvae_realized_price,
+                "realized_return_pct": (cvae_realized_price / buy_price - 1.0) * 100,
+            },
+        })
     logger.info("wrote %d sample plots to %s", plotted, out_dir)
+
+    samples_path = out_dir / "samples.json"
+    with open(samples_path, "w") as f:
+        json.dump(records, f, indent=2)
+    logger.info("wrote %d sample records to %s", len(records), samples_path)
 
 
 def main() -> None:
@@ -488,6 +595,12 @@ def main() -> None:
 
     df, bounds, stats = build_dataset(pt_cfg["data_path"])
     feat, opens, closes = extract_arrays(df)
+
+    sell_bound = train_exit_return_bound(opens, closes, bounds["train"], percentile=args.sell_bound_percentile)
+    logger.info(
+        "sell-price shrink bound: p%.1f of |anchored log return| over train = %.4f (vs. model's own MAX_LOG_RETURN)",
+        args.sell_bound_percentile, sell_bound,
+    )
 
     test_sampler = WindowSampler(*bounds["test"])
     rng = np.random.default_rng(args.seed)
@@ -516,6 +629,10 @@ def main() -> None:
         patchtst, cvae, test_loader, device, args.num_samples
     )
 
+    n, k = len(pt_y), cvae_y.shape[0]
+    pt_y[:, :12] = shrink_components(pt_y[:, :12].reshape(n, 3, 4), sell_bound).reshape(n, 12)
+    cvae_y[..., :12] = shrink_components(cvae_y[..., :12].reshape(k, n, 3, 4), sell_bound).reshape(k, n, 12)
+
     results = {"overall": metrics_for_slice(true_y, pt_y, cvae_y, close_0, stats)}
     results["overall"]["backtest"] = run_backtest(true_y, pt_y, cvae_y, close_0)
 
@@ -535,7 +652,7 @@ def main() -> None:
     logger.info("wrote metrics to %s", args.metrics_out)
     logger.info("overall: %s", json.dumps(results["overall"], indent=2))
 
-    make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, device)
+    make_plots(df, feat, opens, closes, patchtst, cvae, test_sampler, args, device, sell_bound)
 
 
 if __name__ == "__main__":

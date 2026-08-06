@@ -374,6 +374,41 @@ def per_bar_close_return(components: np.ndarray) -> np.ndarray:
     return components[..., 0] + components[..., 1]
 
 
+def train_exit_return_bound(
+    opens: np.ndarray, closes: np.ndarray, train_bounds: tuple[int, int], percentile: float = 99.0
+) -> float:
+    """Empirical p`percentile` of |close_0-anchored log return| across every real
+    (open, close) in the 3-bar horizon, pooled over every possible anchor point in the
+    train split -- independent of ctx_bars, since the horizon's placement doesn't depend
+    on context length (see build_window). This is the actual multi-candle move the
+    model's predicted exit price implies, unlike MAX_LOG_RETURN (see above), which was
+    calibrated from single-bar extremes and ends up looser than intended once anchored
+    open/close returns are pooled 3 bars out. Used to recalibrate predictions post-hoc
+    via shrink_components without retraining."""
+    lo, hi = train_bounds
+    anchors = np.arange(lo + 1, hi - HORIZON + 1)  # ctx_end candidates; need lo<=anchor-1 and anchor+HORIZON-1<hi
+    if len(anchors) == 0:
+        raise ValueError(f"train_bounds {train_bounds} too narrow for HORIZON={HORIZON}")
+    close_0 = closes[anchors - 1]
+    horizon_idx = anchors[:, None] + np.arange(HORIZON)[None, :]  # (M, 3)
+    open_ret = np.log(opens[horizon_idx] / close_0[:, None])  # (M, 3)
+    close_ret = np.log(closes[horizon_idx] / close_0[:, None])  # (M, 3)
+    pooled = np.abs(np.concatenate([open_ret, close_ret], axis=1))  # (M, 6)
+    return float(np.percentile(pooled, percentile))
+
+
+def shrink_components(components: np.ndarray, bound: float) -> np.ndarray:
+    """components: (..., 3, 4) [open_ret, body_ret, upper_wick, lower_wick], already
+    bounded by the model's own MAX_LOG_RETURN. Applies a second, tighter squash -- same
+    tanh shape, tighter scale -- calibrated from train_exit_return_bound instead of
+    single-bar extremes, so a prediction that's technically within MAX_LOG_RETURN can
+    still be shrunk toward a trader-plausible multi-candle move. Not a clip: values well
+    inside `bound` pass through close to unchanged (tanh(x/b)*b ~= x for |x| << b), only
+    the tail gets compressed."""
+    ret, wick = components[..., :2], components[..., 2:]
+    return np.concatenate([bound * np.tanh(ret / bound), bound * np.tanh(wick / bound)], axis=-1)
+
+
 # ---------------------------------------------------------------------------
 # torch Dataset wrappers
 # ---------------------------------------------------------------------------

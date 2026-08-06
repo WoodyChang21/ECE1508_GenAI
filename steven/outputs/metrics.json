@@ -2,28 +2,28 @@
   "overall": {
     "n_windows": 3000,
     "patchtst_reparam_mae_rmse": [
-      0.24651986360549927,
-      0.611725926399231
+      0.21566961705684662,
+      0.609492838382721
     ],
     "cvae_reparam_mae_rmse": [
-      0.16577133536338806,
-      0.5221827626228333
+      0.1656276434659958,
+      0.5220348834991455
     ],
     "patchtst_ohlc_mae_rmse": [
-      38.23243510247657,
-      47.217206609681774
+      11.665500760222042,
+      14.407978039653125
     ],
     "cvae_ohlc_mae_rmse": [
-      3.063748697858568,
-      4.195251845828264
+      2.8569879202819193,
+      3.959427563500377
     ],
     "patchtst_volume_mae_rmse": [
-      4865738.0,
+      4865737.5,
       6022999.5
     ],
     "cvae_volume_mae_rmse": [
-      3488478.5,
-      4643744.5
+      3489570.75,
+      4642045.0
     ],
     "patchtst_directional_accuracy": [
       0.527,
@@ -31,14 +31,14 @@
       0.522
     ],
     "cvae_directional_accuracy": [
-      0.502,
-      0.49833333333333335,
-      0.49966666666666665
+      0.496,
+      0.5173333333333333,
+      0.498
     ],
     "cvae_avg_sample_variance": [
-      27.53007682548756,
-      21.14903339834993,
-      18.331854355146792
+      20.141240278313944,
+      15.997833083922686,
+      15.881317949333662
     ],
     "realized_close_variance": [
       1305.038585982226,
@@ -46,9 +46,9 @@
       1298.8675415354633
     ],
     "cvae_spread_to_realized_ratio": [
-      0.021095220571403474,
-      0.016208562556265092,
-      0.014113721198603279
+      0.01543344426337771,
+      0.012260696430962144,
+      0.012227049673255731
     ],
     "backtest": {
       "note": "long-only limit-order backtest: entry=close_0 (real). Each model's own predicted exit price (mean of its predicted 3 horizon bars' open+close; for CVAE, averaged across the k sampled draws) is placed as a limit sell order at the same time as entry. If any of the 3 REAL horizon bars' [low,high] range reaches that price, the order fills there; otherwise the position is force-closed at the 3rd REAL bar's close instead. confidence (per model) decides which windows to trade. total_return is summed across selected trades -- test windows are independently sampled and can overlap in calendar time, so this is not a sequential equity curve.",
@@ -57,93 +57,93 @@
           "threshold": 0.5,
           "n_trades": 455,
           "selectivity": 0.15166666666666667,
-          "win_rate": 0.5582417582417583,
-          "avg_return": 0.0005611138902741061,
-          "total_return": 0.2553068200747183,
-          "limit_hit_rate": 0.01098901098901099
+          "win_rate": 0.5648351648351648,
+          "avg_return": 0.0006066480399051445,
+          "total_return": 0.27602485815684075,
+          "limit_hit_rate": 0.09230769230769231
         },
         {
           "threshold": 0.6,
           "n_trades": 364,
           "selectivity": 0.12133333333333333,
-          "win_rate": 0.5686813186813187,
-          "avg_return": 0.0005741883819793211,
-          "total_return": 0.20900457104047288,
-          "limit_hit_rate": 0.01098901098901099
+          "win_rate": 0.5576923076923077,
+          "avg_return": 0.0005248020856808397,
+          "total_return": 0.19102795918782567,
+          "limit_hit_rate": 0.06868131868131869
         },
         {
           "threshold": 0.7,
           "n_trades": 273,
           "selectivity": 0.091,
-          "win_rate": 0.5531135531135531,
-          "avg_return": 0.0005874958012130315,
-          "total_return": 0.16038635373115762,
-          "limit_hit_rate": 0.01098901098901099
+          "win_rate": 0.5457875457875457,
+          "avg_return": 0.0004197345621274352,
+          "total_return": 0.11458753546078981,
+          "limit_hit_rate": 0.054945054945054944
         },
         {
           "threshold": 0.8,
           "n_trades": 182,
           "selectivity": 0.06066666666666667,
-          "win_rate": 0.5274725274725275,
-          "avg_return": 4.221559007526938e-05,
-          "total_return": 0.007683237393699027,
-          "limit_hit_rate": 0.005494505494505495
+          "win_rate": 0.5494505494505495,
+          "avg_return": 0.0004296707255499728,
+          "total_return": 0.07820007205009505,
+          "limit_hit_rate": 0.04945054945054945
         },
         {
           "threshold": 0.9,
           "n_trades": 91,
           "selectivity": 0.030333333333333334,
-          "win_rate": 0.4835164835164835,
-          "avg_return": -0.00037667646512879697,
-          "total_return": -0.034277558326720525,
-          "limit_hit_rate": 0.0
+          "win_rate": 0.5714285714285714,
+          "avg_return": 0.0007953886147383805,
+          "total_return": 0.07238036394119263,
+          "limit_hit_rate": 0.054945054945054944
         }
       ],
       "cvae": [
         {
           "threshold": 0.5,
-          "n_trades": 1914,
-          "selectivity": 0.638,
-          "win_rate": 0.6238244514106583,
-          "avg_return": 0.00012069929667525805,
-          "total_return": 0.23101845383644393,
-          "limit_hit_rate": 0.49843260188087773
+          "n_trades": 1966,
+          "selectivity": 0.6553333333333333,
+          "win_rate": 0.6515768056968464,
+          "avg_return": 0.00015787019815312266,
+          "total_return": 0.3103728095690391,
+          "limit_hit_rate": 0.5305188199389623
         },
         {
           "threshold": 0.6,
-          "n_trades": 1914,
-          "selectivity": 0.638,
-          "win_rate": 0.6238244514106583,
-          "avg_return": 0.00012069929667525805,
-          "total_return": 0.23101845383644393,
-          "limit_hit_rate": 0.49843260188087773
+          "n_trades": 1966,
+          "selectivity": 0.6553333333333333,
+          "win_rate": 0.6515768056968464,
+          "avg_return": 0.00015787019815312266,
+          "total_return": 0.3103728095690391,
+          "limit_hit_rate": 0.5305188199389623
         },
         {
           "threshold": 0.7,
-          "n_trades": 1163,
-          "selectivity": 0.38766666666666666,
-          "win_rate": 0.6104901117798797,
-          "avg_return": 2.0389674419864553e-05,
-          "total_return": 0.023713191350302476,
-          "limit_hit_rate": 0.3757523645743766
+          "n_trades": 1179,
+          "selectivity": 0.393,
+          "win_rate": 0.6437659033078881,
+          "avg_return": 0.0002339197378021029,
+          "total_return": 0.27579137086867933,
+          "limit_hit_rate": 0.42748091603053434
         },
         {
           "threshold": 0.8,
-          "n_trades": 1163,
-          "selectivity": 0.38766666666666666,
-          "win_rate": 0.6104901117798797,
-          "avg_return": 2.0389674419864553e-05,
-          "total_return": 0.023713191350302476,
-          "limit_hit_rate": 0.3757523645743766
+          "n_trades": 1179,
+          "selectivity": 0.393,
+          "win_rate": 0.6437659033078881,
+          "avg_return": 0.0002339197378021029,
+          "total_return": 0.27579137086867933,
+          "limit_hit_rate": 0.42748091603053434
         },
         {
           "threshold": 0.9,
-          "n_trades": 411,
-          "selectivity": 0.137,
-          "win_rate": 0.5815085158150851,
-          "avg_return": 0.00010346355036034048,
-          "total_return": 0.042523519198099935,
-          "limit_hit_rate": 0.2846715328467153
+          "n_trades": 466,
+          "selectivity": 0.15533333333333332,
+          "win_rate": 0.5944206008583691,
+          "avg_return": 0.00015602023134244822,
+          "total_return": 0.07270542780558087,
+          "limit_hit_rate": 0.3133047210300429
         }
       ]
     }
@@ -151,28 +151,28 @@
   "short": {
     "n_windows": 1002,
     "patchtst_reparam_mae_rmse": [
-      0.23183341324329376,
-      0.5550773739814758
+      0.20257937908172607,
+      0.5528435707092285
     ],
     "cvae_reparam_mae_rmse": [
-      0.18692010641098022,
-      0.5406840443611145
+      0.18664760887622833,
+      0.5405979752540588
     ],
     "patchtst_ohlc_mae_rmse": [
-      37.80238347681171,
-      46.6802347906274
+      12.11405645376082,
+      15.025838584271375
     ],
     "cvae_ohlc_mae_rmse": [
-      3.2172854729260854,
-      4.2665178204825995
+      3.014704144562319,
+      4.01607725136026
     ],
     "patchtst_volume_mae_rmse": [
       4468591.0,
-      5571135.5
+      5571135.0
     ],
     "cvae_volume_mae_rmse": [
-      4157379.25,
-      5093623.0
+      4155689.0,
+      5090053.5
     ],
     "patchtst_directional_accuracy": [
       0.5249500998003992,
@@ -180,14 +180,14 @@
       0.5089820359281437
     ],
     "cvae_directional_accuracy": [
-      0.4540918163672655,
-      0.4750499001996008,
-      0.49101796407185627
+      0.49101796407185627,
+      0.5079840319361277,
+      0.48502994011976047
     ],
     "cvae_avg_sample_variance": [
-      23.09254316727685,
-      19.565574121969345,
-      15.18464513584951
+      18.299748548431932,
+      15.261975836994125,
+      14.481672712957362
     ],
     "realized_close_variance": [
       1353.5598506103881,
@@ -195,9 +195,9 @@
       1342.8508673984745
     ],
     "cvae_spread_to_realized_ratio": [
-      0.01706059998518962,
-      0.014481822415830434,
-      0.011307767306482032
+      0.01351971879202804,
+      0.011296434360076801,
+      0.01078427475793565
     ],
     "backtest": {
       "note": "long-only limit-order backtest: entry=close_0 (real). Each model's own predicted exit price (mean of its predicted 3 horizon bars' open+close; for CVAE, averaged across the k sampled draws) is placed as a limit sell order at the same time as entry. If any of the 3 REAL horizon bars' [low,high] range reaches that price, the order fills there; otherwise the position is force-closed at the 3rd REAL bar's close instead. confidence (per model) decides which windows to trade. total_return is summed across selected trades -- test windows are independently sampled and can overlap in calendar time, so this is not a sequential equity curve.",
@@ -207,92 +207,92 @@
           "n_trades": 174,
           "selectivity": 0.17365269461077845,
           "win_rate": 0.5114942528735632,
-          "avg_return": -0.00035619724299258644,
-          "total_return": -0.06197832028071004,
-          "limit_hit_rate": 0.005747126436781609
+          "avg_return": -0.0002994807972305116,
+          "total_return": -0.05210965871810902,
+          "limit_hit_rate": 0.06321839080459771
         },
         {
           "threshold": 0.6,
           "n_trades": 139,
           "selectivity": 0.13872255489021956,
-          "win_rate": 0.5107913669064749,
-          "avg_return": -0.00021070799381612076,
-          "total_return": -0.029288411140440784,
-          "limit_hit_rate": 0.0
+          "win_rate": 0.49640287769784175,
+          "avg_return": -0.0003095472888123201,
+          "total_return": -0.0430270731449125,
+          "limit_hit_rate": 0.03597122302158273
         },
         {
           "threshold": 0.7,
           "n_trades": 105,
           "selectivity": 0.10479041916167664,
-          "win_rate": 0.44761904761904764,
-          "avg_return": -0.0006245323589869802,
-          "total_return": -0.06557589769363292,
-          "limit_hit_rate": 0.0
+          "win_rate": 0.49523809523809526,
+          "avg_return": -0.0004713527739994127,
+          "total_return": -0.049492041269938336,
+          "limit_hit_rate": 0.02857142857142857
         },
         {
           "threshold": 0.8,
           "n_trades": 70,
           "selectivity": 0.06986027944111776,
-          "win_rate": 0.38571428571428573,
-          "avg_return": -0.0017928966454097092,
-          "total_return": -0.12550276517867964,
-          "limit_hit_rate": 0.0
+          "win_rate": 0.5571428571428572,
+          "avg_return": 0.0005758773712884801,
+          "total_return": 0.04031141599019361,
+          "limit_hit_rate": 0.04285714285714286
         },
         {
           "threshold": 0.9,
           "n_trades": 35,
           "selectivity": 0.03493013972055888,
-          "win_rate": 0.45714285714285713,
-          "avg_return": 0.0006468193871634442,
-          "total_return": 0.022638678550720548,
+          "win_rate": 0.5428571428571428,
+          "avg_return": 0.00033799580165317766,
+          "total_return": 0.011829853057861217,
           "limit_hit_rate": 0.0
         }
       ],
       "cvae": [
         {
           "threshold": 0.5,
-          "n_trades": 364,
-          "selectivity": 0.36327345309381237,
-          "win_rate": 0.5796703296703297,
-          "avg_return": -0.00020131540276628902,
-          "total_return": -0.0732788066069292,
-          "limit_hit_rate": 0.6703296703296703
+          "n_trades": 384,
+          "selectivity": 0.38323353293413176,
+          "win_rate": 0.609375,
+          "avg_return": -5.1930593326682727e-05,
+          "total_return": -0.019941347837446166,
+          "limit_hit_rate": 0.6614583333333334
         },
         {
           "threshold": 0.6,
-          "n_trades": 364,
-          "selectivity": 0.36327345309381237,
-          "win_rate": 0.5796703296703297,
-          "avg_return": -0.00020131540276628902,
-          "total_return": -0.0732788066069292,
-          "limit_hit_rate": 0.6703296703296703
+          "n_trades": 384,
+          "selectivity": 0.38323353293413176,
+          "win_rate": 0.609375,
+          "avg_return": -5.1930593326682727e-05,
+          "total_return": -0.019941347837446166,
+          "limit_hit_rate": 0.6614583333333334
         },
         {
           "threshold": 0.7,
-          "n_trades": 136,
-          "selectivity": 0.13572854291417166,
-          "win_rate": 0.5735294117647058,
-          "avg_return": -0.0008230840750769056,
-          "total_return": -0.11193943421045915,
-          "limit_hit_rate": 0.5147058823529411
+          "n_trades": 129,
+          "selectivity": 0.12874251497005987,
+          "win_rate": 0.627906976744186,
+          "avg_return": -0.0006137735621873609,
+          "total_return": -0.07917678952216956,
+          "limit_hit_rate": 0.5426356589147286
         },
         {
           "threshold": 0.8,
-          "n_trades": 136,
-          "selectivity": 0.13572854291417166,
-          "win_rate": 0.5735294117647058,
-          "avg_return": -0.0008230840750769056,
-          "total_return": -0.11193943421045915,
-          "limit_hit_rate": 0.5147058823529411
+          "n_trades": 129,
+          "selectivity": 0.12874251497005987,
+          "win_rate": 0.627906976744186,
+          "avg_return": -0.0006137735621873609,
+          "total_return": -0.07917678952216956,
+          "limit_hit_rate": 0.5426356589147286
         },
         {
           "threshold": 0.9,
-          "n_trades": 22,
-          "selectivity": 0.021956087824351298,
-          "win_rate": 0.45454545454545453,
-          "avg_return": -0.0023261137984015804,
-          "total_return": -0.05117450356483477,
-          "limit_hit_rate": 0.3181818181818182
+          "n_trades": 34,
+          "selectivity": 0.033932135728542916,
+          "win_rate": 0.6176470588235294,
+          "avg_return": -0.00037405023387832676,
+          "total_return": -0.012717707951863111,
+          "limit_hit_rate": 0.4117647058823529
         }
       ]
     }
@@ -300,28 +300,28 @@
   "medium": {
     "n_windows": 999,
     "patchtst_reparam_mae_rmse": [
-      0.2487548142671585,
-      0.6314896941184998
+      0.21746788918972015,
+      0.6292705535888672
     ],
     "cvae_reparam_mae_rmse": [
-      0.16327176988124847,
-      0.5327078700065613
+      0.16299809515476227,
+      0.5321347117424011
     ],
     "patchtst_ohlc_mae_rmse": [
-      39.25725756301977,
-      48.478435145986055
+      11.671540497065322,
+      14.406708898217147
     ],
     "cvae_ohlc_mae_rmse": [
-      2.8032998303461016,
-      3.9856617793717573
+      2.6218799709964866,
+      3.8048742618705576
     ],
     "patchtst_volume_mae_rmse": [
       4894963.0,
-      6072241.0
+      6072240.5
     ],
     "cvae_volume_mae_rmse": [
-      3392053.75,
-      4554534.5
+      3389167.0,
+      4550536.0
     ],
     "patchtst_directional_accuracy": [
       0.5485485485485485,
@@ -329,14 +329,14 @@
       0.5165165165165165
     ],
     "cvae_directional_accuracy": [
-      0.5245245245245245,
-      0.5045045045045045,
-      0.5075075075075075
+      0.5025025025025025,
+      0.5335335335335335,
+      0.5045045045045045
     ],
     "cvae_avg_sample_variance": [
-      27.571903791501516,
-      21.36743825763369,
-      18.79278039615902
+      20.505613741765956,
+      16.0176906765739,
+      15.64378622392992
     ],
     "realized_close_variance": [
       1278.1548214024208,
@@ -344,9 +344,9 @@
       1273.7420117575268
     ],
     "cvae_spread_to_realized_ratio": [
-      0.02157164635286435,
-      0.016709921293699484,
-      0.01475399274161373
+      0.016043137653126188,
+      0.012526272325450722,
+      0.012281754138221765
     ],
     "backtest": {
       "note": "long-only limit-order backtest: entry=close_0 (real). Each model's own predicted exit price (mean of its predicted 3 horizon bars' open+close; for CVAE, averaged across the k sampled draws) is placed as a limit sell order at the same time as entry. If any of the 3 REAL horizon bars' [low,high] range reaches that price, the order fills there; otherwise the position is force-closed at the 3rd REAL bar's close instead. confidence (per model) decides which windows to trade. total_return is summed across selected trades -- test windows are independently sampled and can overlap in calendar time, so this is not a sequential equity curve.",
@@ -356,92 +356,92 @@
           "n_trades": 156,
           "selectivity": 0.15615615615615616,
           "win_rate": 0.5769230769230769,
-          "avg_return": 0.001075405086207596,
-          "total_return": 0.16776319344838497,
-          "limit_hit_rate": 0.01282051282051282
+          "avg_return": 0.0010368908062959336,
+          "total_return": 0.16175496578216564,
+          "limit_hit_rate": 0.09615384615384616
         },
         {
           "threshold": 0.6,
           "n_trades": 125,
           "selectivity": 0.12512512512512514,
-          "win_rate": 0.552,
-          "avg_return": 0.0008941365877787292,
-          "total_return": 0.11176707347234116,
-          "limit_hit_rate": 0.016
+          "win_rate": 0.56,
+          "avg_return": 0.000968840440114338,
+          "total_return": 0.12110505501429225,
+          "limit_hit_rate": 0.064
         },
         {
           "threshold": 0.7,
           "n_trades": 94,
           "selectivity": 0.0940940940940941,
-          "win_rate": 0.5638297872340425,
-          "avg_return": 0.0010467630328861632,
-          "total_return": 0.09839572509129935,
-          "limit_hit_rate": 0.02127659574468085
+          "win_rate": 0.574468085106383,
+          "avg_return": 0.0007424258382607875,
+          "total_return": 0.06978802879651402,
+          "limit_hit_rate": 0.06382978723404255
         },
         {
           "threshold": 0.8,
           "n_trades": 63,
           "selectivity": 0.06306306306306306,
-          "win_rate": 0.6031746031746031,
-          "avg_return": 0.0008180125680550195,
-          "total_return": 0.05153479178746623,
-          "limit_hit_rate": 0.015873015873015872
+          "win_rate": 0.5555555555555556,
+          "avg_return": 0.00024159102843552334,
+          "total_return": 0.01522023479143797,
+          "limit_hit_rate": 0.047619047619047616
         },
         {
           "threshold": 0.9,
           "n_trades": 32,
           "selectivity": 0.03203203203203203,
-          "win_rate": 0.5625,
-          "avg_return": -0.00061789900064467,
-          "total_return": -0.01977276802062944,
-          "limit_hit_rate": 0.0
+          "win_rate": 0.625,
+          "avg_return": 0.0013354125743111102,
+          "total_return": 0.042733202377955526,
+          "limit_hit_rate": 0.09375
         }
       ],
       "cvae": [
         {
           "threshold": 0.5,
-          "n_trades": 682,
-          "selectivity": 0.6826826826826827,
-          "win_rate": 0.6451612903225806,
-          "avg_return": -0.00011666513258410743,
-          "total_return": -0.07956562042236126,
-          "limit_hit_rate": 0.5190615835777126
+          "n_trades": 705,
+          "selectivity": 0.7057057057057057,
+          "win_rate": 0.6907801418439716,
+          "avg_return": -2.3807135034116238e-05,
+          "total_return": -0.016784030199051947,
+          "limit_hit_rate": 0.5900709219858156
         },
         {
           "threshold": 0.6,
-          "n_trades": 682,
-          "selectivity": 0.6826826826826827,
-          "win_rate": 0.6451612903225806,
-          "avg_return": -0.00011666513258410743,
-          "total_return": -0.07956562042236126,
-          "limit_hit_rate": 0.5190615835777126
+          "n_trades": 705,
+          "selectivity": 0.7057057057057057,
+          "win_rate": 0.6907801418439716,
+          "avg_return": -2.3807135034116238e-05,
+          "total_return": -0.016784030199051947,
+          "limit_hit_rate": 0.5900709219858156
         },
         {
           "threshold": 0.7,
-          "n_trades": 380,
-          "selectivity": 0.38038038038038036,
-          "win_rate": 0.631578947368421,
-          "avg_return": -0.0002727496257999457,
-          "total_return": -0.10364485780397936,
-          "limit_hit_rate": 0.39210526315789473
+          "n_trades": 401,
+          "selectivity": 0.4014014014014014,
+          "win_rate": 0.6658354114713217,
+          "avg_return": -0.00010869016472935176,
+          "total_return": -0.04358475605647005,
+          "limit_hit_rate": 0.49625935162094764
         },
         {
           "threshold": 0.8,
-          "n_trades": 380,
-          "selectivity": 0.38038038038038036,
-          "win_rate": 0.631578947368421,
-          "avg_return": -0.0002727496257999457,
-          "total_return": -0.10364485780397936,
-          "limit_hit_rate": 0.39210526315789473
+          "n_trades": 401,
+          "selectivity": 0.4014014014014014,
+          "win_rate": 0.6658354114713217,
+          "avg_return": -0.00010869016472935176,
+          "total_return": -0.04358475605647005,
+          "limit_hit_rate": 0.49625935162094764
         },
         {
           "threshold": 0.9,
-          "n_trades": 117,
-          "selectivity": 0.11711711711711711,
-          "win_rate": 0.5897435897435898,
-          "avg_return": 2.0763744995470914e-05,
-          "total_return": 0.0024293581644700968,
-          "limit_hit_rate": 0.29914529914529914
+          "n_trades": 118,
+          "selectivity": 0.11811811811811812,
+          "win_rate": 0.5677966101694916,
+          "avg_return": -0.0007528523098951008,
+          "total_return": -0.0888365725676219,
+          "limit_hit_rate": 0.3474576271186441
         }
       ]
     }
@@ -449,28 +449,28 @@
   "long": {
     "n_windows": 999,
     "patchtst_reparam_mae_rmse": [
-      0.2590154707431793,
-      0.6449295878410339
+      0.22700096666812897,
+      0.6426701545715332
     ],
     "cvae_reparam_mae_rmse": [
-      0.1470586508512497,
-      0.4917808771133423
+      0.14717409014701843,
+      0.49202483892440796
     ],
     "patchtst_ohlc_mae_rmse": [
-      37.63895571392157,
-      46.468723008109926
+      11.209558315745275,
+      13.761751143670988
     ],
     "cvae_ohlc_mae_rmse": [
-      3.1701997189069187,
-      4.32549755496735
+      2.9339060229918155,
+      4.052640925115371
     ],
     "patchtst_volume_mae_rmse": [
       5234852.5,
-      6398096.5
+      6398097.0
     ],
     "cvae_volume_mae_rmse": [
-      2913993.5,
-      4241597.5
+      2921855.75,
+      4244600.0
     ],
     "patchtst_directional_accuracy": [
       0.5075075075075075,
@@ -478,14 +478,14 @@
       0.5405405405405406
     ],
     "cvae_directional_accuracy": [
-      0.5275275275275275,
-      0.5155155155155156,
-      0.5005005005005005
+      0.4944944944944945,
+      0.5105105105105106,
+      0.5045045045045045
     ],
     "cvae_avg_sample_variance": [
-      31.93910944458592,
-      22.51884294840876,
-      21.02758861216842
+      21.623888549938606,
+      16.716042519722198,
+      17.5226980499617
     ],
     "realized_close_variance": [
       1282.368571800834,
@@ -493,9 +493,9 @@
       1278.6238999618595
     ],
     "cvae_spread_to_realized_ratio": [
-      0.024906341395854497,
-      0.017544038084228004,
-      0.016445483783617418
+      0.016862459846136213,
+      0.013023177401053097,
+      0.013704341089263536
     ],
     "backtest": {
       "note": "long-only limit-order backtest: entry=close_0 (real). Each model's own predicted exit price (mean of its predicted 3 horizon bars' open+close; for CVAE, averaged across the k sampled draws) is placed as a limit sell order at the same time as entry. If any of the 3 REAL horizon bars' [low,high] range reaches that price, the order fills there; otherwise the position is force-closed at the 3rd REAL bar's close instead. confidence (per model) decides which windows to trade. total_return is summed across selected trades -- test windows are independently sampled and can overlap in calendar time, so this is not a sequential equity curve.",
@@ -504,93 +504,93 @@
           "threshold": 0.5,
           "n_trades": 125,
           "selectivity": 0.12512512512512514,
-          "win_rate": 0.656,
-          "avg_return": 0.0012788353761037214,
-          "total_return": 0.15985442201296518,
-          "limit_hit_rate": 0.008
+          "win_rate": 0.68,
+          "avg_return": 0.001447813987731937,
+          "total_return": 0.18097674846649214,
+          "limit_hit_rate": 0.128
         },
         {
           "threshold": 0.6,
           "n_trades": 100,
           "selectivity": 0.1001001001001001,
-          "win_rate": 0.64,
-          "avg_return": 0.0015413094560305285,
-          "total_return": 0.15413094560305285,
-          "limit_hit_rate": 0.01
+          "win_rate": 0.66,
+          "avg_return": 0.0015444424748420772,
+          "total_return": 0.1544442474842077,
+          "limit_hit_rate": 0.09
         },
         {
           "threshold": 0.7,
           "n_trades": 75,
           "selectivity": 0.07507507507507508,
-          "win_rate": 0.68,
-          "avg_return": 0.001876433028115169,
-          "total_return": 0.14073247710863768,
-          "limit_hit_rate": 0.013333333333333334
+          "win_rate": 0.7066666666666667,
+          "avg_return": 0.001853930950164798,
+          "total_return": 0.13904482126235984,
+          "limit_hit_rate": 0.10666666666666667
         },
         {
           "threshold": 0.8,
           "n_trades": 50,
           "selectivity": 0.05005005005005005,
-          "win_rate": 0.72,
-          "avg_return": 0.0018879628181457564,
-          "total_return": 0.09439814090728782,
-          "limit_hit_rate": 0.0
+          "win_rate": 0.66,
+          "avg_return": 0.0019037340084711763,
+          "total_return": 0.09518670042355881,
+          "limit_hit_rate": 0.1
         },
         {
           "threshold": 0.9,
           "n_trades": 25,
           "selectivity": 0.025025025025025027,
           "win_rate": 0.56,
-          "avg_return": 0.0012942361831665128,
-          "total_return": 0.03235590457916282,
-          "limit_hit_rate": 0.0
+          "avg_return": 0.0004926872253417969,
+          "total_return": 0.012317180633544922,
+          "limit_hit_rate": 0.12
         }
       ],
       "cvae": [
         {
           "threshold": 0.5,
-          "n_trades": 868,
-          "selectivity": 0.8688688688688688,
-          "win_rate": 0.6255760368663594,
-          "avg_return": 0.0004422383420112147,
-          "total_return": 0.3838628808657344,
-          "limit_hit_rate": 0.41013824884792627
+          "n_trades": 877,
+          "selectivity": 0.8778778778778779,
+          "win_rate": 0.6385404789053591,
+          "avg_return": 0.0003957790052514678,
+          "total_return": 0.34709818760553723,
+          "limit_hit_rate": 0.42531356898517675
         },
         {
           "threshold": 0.6,
-          "n_trades": 868,
-          "selectivity": 0.8688688688688688,
-          "win_rate": 0.6255760368663594,
-          "avg_return": 0.0004422383420112147,
-          "total_return": 0.3838628808657344,
-          "limit_hit_rate": 0.41013824884792627
+          "n_trades": 877,
+          "selectivity": 0.8778778778778779,
+          "win_rate": 0.6385404789053591,
+          "avg_return": 0.0003957790052514678,
+          "total_return": 0.34709818760553723,
+          "limit_hit_rate": 0.42531356898517675
         },
         {
           "threshold": 0.7,
-          "n_trades": 647,
-          "selectivity": 0.6476476476476476,
-          "win_rate": 0.6058732612055642,
-          "avg_return": 0.00036985700674612207,
-          "total_return": 0.239297483364741,
-          "limit_hit_rate": 0.3369397217928903
+          "n_trades": 649,
+          "selectivity": 0.6496496496496497,
+          "win_rate": 0.6332819722650231,
+          "avg_return": 0.0006141031070066548,
+          "total_return": 0.39855291644731894,
+          "limit_hit_rate": 0.362095531587057
         },
         {
           "threshold": 0.8,
-          "n_trades": 647,
-          "selectivity": 0.6476476476476476,
-          "win_rate": 0.6058732612055642,
-          "avg_return": 0.00036985700674612207,
-          "total_return": 0.239297483364741,
-          "limit_hit_rate": 0.3369397217928903
+          "n_trades": 649,
+          "selectivity": 0.6496496496496497,
+          "win_rate": 0.6332819722650231,
+          "avg_return": 0.0006141031070066548,
+          "total_return": 0.39855291644731894,
+          "limit_hit_rate": 0.362095531587057
         },
         {
           "threshold": 0.9,
-          "n_trades": 272,
-          "selectivity": 0.2722722722722723,
-          "win_rate": 0.5882352941176471,
-          "avg_return": 0.00033554656102376693,
-          "total_return": 0.09126866459846461,
-          "limit_hit_rate": 0.2757352941176471
+          "n_trades": 314,
+          "selectivity": 0.31431431431431434,
+          "win_rate": 0.6019108280254777,
+          "avg_return": 0.000554967223965178,
+          "total_return": 0.17425970832506588,
+          "limit_hit_rate": 0.2898089171974522
         }
       ]
     }
