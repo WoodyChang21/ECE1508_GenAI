@@ -59,6 +59,7 @@ def cvae_loss(
 
     total = recon_loss + beta * kl_loss
     parts = dict(parts)
+    parts["recon_loss"] = recon_loss.item()  # unweighted by beta -- see cyclical annealing note in train_cvae.py
     parts["kl_loss"] = kl_loss.item()
     parts["beta"] = beta
     return total, parts

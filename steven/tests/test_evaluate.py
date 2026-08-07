@@ -59,6 +59,29 @@ def test_take_profit_exit_scenarios():
     np.testing.assert_array_equal(hit_tp, [True, False, True, True])
 
 
+def test_take_profit_exit_gap_through_fills_at_open_not_target():
+    """take_profit=105 for every row. A bar whose entire range (including its open)
+    already sits above the target -- a gap through the limit price -- must fill at that
+    bar's OPEN (the market never actually touched 105, and a real limit order guarantees
+    at least the limit price), not at the stale take_profit level, and must still count
+    as a take-profit hit, not an expiry.
+    row0: gaps through on bar0 -> fills at bar0's open (110), not 105.
+    row1: bar0 doesn't even reach the target; bar1 gaps through -> fills at bar1's open (109).
+    row2: gaps through on bar0; bar1's much larger range must NOT override the already-resolved fill.
+    """
+    true_ohlc = np.array([
+        [_bar(110, 112, 108, 111), _bar(100, 101, 99, 100), _bar(100, 101, 99, 100)],  # row0
+        [_bar(100, 102, 99, 101), _bar(109, 111, 107, 110), _bar(100, 101, 99, 100)],  # row1
+        [_bar(110, 112, 108, 111), _bar(200, 210, 190, 205), _bar(100, 101, 99, 100)],  # row2
+    ])
+    take_profit = np.full(3, 105.0)
+
+    sell_price, hit_tp = ev.take_profit_exit(true_ohlc, take_profit)
+
+    np.testing.assert_allclose(sell_price, [110.0, 109.0, 110.0])
+    np.testing.assert_array_equal(hit_tp, [True, True, True])
+
+
 def test_classify_walk_forward_decision_all_five_cases():
     # not eligible at all -> no_trade, regardless of everything else
     assert ev.classify_walk_forward_decision(False, True, True, True, 0.05) == ("no_trade", False)

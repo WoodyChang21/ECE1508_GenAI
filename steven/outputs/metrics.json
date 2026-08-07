@@ -29,43 +29,43 @@
       "n_decisions": 1719,
       "n_trades": 339,
       "outcome_breakdown": {
-        "win_take_profit": 0.055846422338568937,
-        "win_expiry": 0.05759162303664921,
+        "win_take_profit": 0.05700988947062245,
+        "win_expiry": 0.0564281559045957,
         "lose_expiry": 0.08376963350785341,
         "skipped": 0.7591623036649214,
         "no_trade": 0.04363001745200698
       },
-      "total_return": -0.025638221880931678,
+      "total_return": -0.03706943980035404,
       "win_rate": 0.5752212389380531,
-      "take_profit_rate": 0.2831858407079646,
-      "avg_return": -6.434558767133284e-05,
+      "take_profit_rate": 0.2890855457227139,
+      "avg_return": -9.954327327312148e-05,
       "entry_date": "2024-01-17",
       "entry_price": 471.84,
       "exit_date": "2025-05-30",
       "exit_price": 585.8899993419648,
       "elapsed_years": 1.3665297741273101,
-      "annual_return": -0.018826771792503694
+      "annual_return": -0.02726371320969645
     },
     "cvae": {
       "n_decisions": 802,
       "n_trades": 798,
       "outcome_breakdown": {
-        "win_take_profit": 0.2955112219451372,
-        "win_expiry": 0.29177057356608477,
+        "win_take_profit": 0.3329177057356609,
+        "win_expiry": 0.2543640897755611,
         "lose_expiry": 0.4077306733167082,
         "skipped": 0.003740648379052369,
         "no_trade": 0.0012468827930174563
       },
-      "total_return": 0.07578928453185974,
+      "total_return": 0.054033220535548265,
       "win_rate": 0.5902255639097744,
-      "take_profit_rate": 0.29699248120300753,
-      "avg_return": 0.00010948153018154873,
+      "take_profit_rate": 0.33458646616541354,
+      "avg_return": 8.372528262205772e-05,
       "entry_date": "2024-01-16",
       "entry_price": 474.95,
       "exit_date": "2025-05-30",
-      "exit_price": 589.0701754469276,
+      "exit_price": 589.0701824217439,
       "elapsed_years": 1.36881131644992,
-      "annual_return": 0.05482074277025539
+      "annual_return": 0.03919358411912088
     }
   }
 }

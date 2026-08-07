@@ -73,7 +73,7 @@ def collate(batch: list[dict]) -> dict:
 
 def run_epoch(model, loader, optimizer, loss_cfg, beta, device, train: bool) -> dict:
     model.train(mode=train)
-    totals = {"loss": 0.0, "price_loss": 0.0, "vol_loss": 0.0, "kl_loss": 0.0}
+    totals = {"loss": 0.0, "price_loss": 0.0, "vol_loss": 0.0, "recon_loss": 0.0, "kl_loss": 0.0}
     n = 0
     for batch in loader:
         masked_tensor = batch["masked_tensor"].to(device)
@@ -96,6 +96,7 @@ def run_epoch(model, loader, optimizer, loss_cfg, beta, device, train: bool) -> 
         totals["loss"] += loss.item() * bs
         totals["price_loss"] += parts["price_loss"] * bs
         totals["vol_loss"] += parts["vol_loss"] * bs
+        totals["recon_loss"] += parts["recon_loss"] * bs
         totals["kl_loss"] += parts["kl_loss"] * bs
         n += bs
 
@@ -147,7 +148,7 @@ def main() -> None:
         model.parameters(), lr=cfg["train"]["lr"], weight_decay=cfg["train"]["weight_decay"]
     )
 
-    best_val_loss = float("inf")
+    best_val_recon_loss = float("inf")
     ckpt_path = Path(cfg["output"]["checkpoint_path"])
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -168,19 +169,25 @@ def main() -> None:
         val_metrics = run_epoch(model, val_loader, optimizer, cfg["loss"], beta, device, train=False)
 
         logger.info(
-            "epoch %d/%d  beta=%.2f  train_loss=%.5f (kl=%.4f)  val_loss=%.5f (kl=%.4f)  (%.1fs)",
+            "epoch %d/%d  beta=%.2f  train_recon=%.5f (kl=%.4f)  val_recon=%.5f (kl=%.4f)  (%.1fs)",
             epoch + 1, max_epochs, beta,
-            train_metrics["loss"], train_metrics["kl_loss"],
-            val_metrics["loss"], val_metrics["kl_loss"],
+            train_metrics["recon_loss"], train_metrics["kl_loss"],
+            val_metrics["recon_loss"], val_metrics["kl_loss"],
             time.time() - t0,
         )
 
-        if val_metrics["loss"] < best_val_loss:
-            best_val_loss = val_metrics["loss"]
+        # Select on reconstruction loss alone, NOT the raw total (recon + beta*kl_loss) --
+        # beta cycles between kl_ramp_fraction's low point and 1.0 (see kl_beta_schedule),
+        # so the raw total is only comparable *within* the same phase of a cycle. Selecting
+        # on it would deterministically prefer whatever epoch has the lowest beta (i.e. the
+        # first epoch of each cycle) regardless of how well-trained the model actually is --
+        # exactly the failure mode this replaced.
+        if val_metrics["recon_loss"] < best_val_recon_loss:
+            best_val_recon_loss = val_metrics["recon_loss"]
             torch.save({"model_state": model.state_dict(), "config": cfg}, ckpt_path)
-            logger.info("  -> saved best checkpoint (val_loss=%.5f) to %s", best_val_loss, ckpt_path)
+            logger.info("  -> saved best checkpoint (val_recon=%.5f) to %s", best_val_recon_loss, ckpt_path)
 
-    logger.info("done. best val_loss=%.5f, checkpoint=%s", best_val_loss, ckpt_path)
+    logger.info("done. best val_recon=%.5f, checkpoint=%s", best_val_recon_loss, ckpt_path)
 
 
 if __name__ == "__main__":

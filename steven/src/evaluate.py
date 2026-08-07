@@ -123,14 +123,23 @@ def cvae_confidence_scores(cvae_price_samples: np.ndarray, close_0: np.ndarray) 
 def take_profit_exit(
     true_ohlc: np.ndarray, take_profit: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Simulates a take-profit-only limit order (no stop-loss -- see the module note
+    """Simulates a take-profit-only limit sell order (no stop-loss -- see the module note
     above run_walk_forward for why) placed at the same time as the close_0 buy. Walks the
-    3 REAL horizon bars in order; the first bar whose real [low,high] range reaches
-    take_profit fills the order there. If it's never reached across all 3 bars, the
-    position is force-closed at the 3rd bar's real close instead (order expiry).
-    true_ohlc: (N,3,4) real [open,high,low,close]. take_profit: (N,). Returns
-    (realized_sell_price (N,), hit_take_profit (N,) bool)."""
+    3 REAL horizon bars in order; the first bar that reaches take_profit fills the order,
+    in one of two ways:
+    - **Touched mid-bar** (low <= take_profit <= high): fills at take_profit itself --
+      the bar's range crossed the limit price but didn't open beyond it.
+    - **Gapped through** (low > take_profit, i.e. the entire bar -- including its open --
+      already sits above the target): a real limit sell order guarantees *at least* the
+      limit price, so if the market gaps straight past it, the order fills immediately at
+      the open, not at the stale take_profit level (which the market never actually
+      touched, since low already clears it). This is still a take-profit win, just filled
+      at a better-than-target price -- not an expiry.
+    If neither ever happens across all 3 bars, the position is force-closed at the 3rd
+    bar's real close instead (order expiry). true_ohlc: (N,3,4) real [open,high,low,close].
+    take_profit: (N,). Returns (realized_sell_price (N,), hit_take_profit (N,) bool)."""
     n = true_ohlc.shape[0]
+    open_ = true_ohlc[:, :, 0]
     low = true_ohlc[:, :, 2]
     high = true_ohlc[:, :, 1]
 
@@ -139,10 +148,13 @@ def take_profit_exit(
     resolved = np.zeros(n, dtype=bool)
 
     for bar in range(HORIZON):
-        tp_touch = (~resolved) & (low[:, bar] <= take_profit) & (take_profit <= high[:, bar])
-        sell_price[tp_touch] = take_profit[tp_touch]
-        hit_take_profit[tp_touch] = True
-        resolved |= tp_touch
+        touched = (~resolved) & (low[:, bar] <= take_profit) & (take_profit <= high[:, bar])
+        gapped = (~resolved) & (low[:, bar] > take_profit)  # whole bar, incl. open, already above target
+
+        sell_price[touched] = take_profit[touched]
+        sell_price[gapped] = open_[:, bar][gapped]
+        hit_take_profit[touched | gapped] = True
+        resolved |= touched | gapped
 
     return sell_price, hit_take_profit
 

@@ -55,6 +55,26 @@ these changes weren't enough and the next lever to pull is architectural (e.g. d
 context input from the prior's, or reduce decoder capacity so it can't reconstruct well from context
 alone -- see the root-cause paragraph above).
 
+**First retrain result (2026-08-07)**: KL settled at `1.2000-1.2029` in most epochs (occasionally
+`1.2125` right after a cyclical-annealing reset) -- no longer pinned to 4 decimal places with zero
+deviation the way the old `0.8000` was, and it visibly reacts to each beta reset (rises, then gets pulled
+back down as beta climbs back to 1.0), so *something* changed. But the excess over the floor is small
+(roughly 0.2-1%), so this reads as "still substantially collapsed, marginally less totally so" rather than
+a clear fix -- not enough on its own to conclude collapse is resolved.
+
+**Also found and fixed a real bug in the same run, unrelated to whether the model-side fix worked**:
+`train_cvae.py` was selecting the "best" checkpoint by raw `val_loss` (`recon_loss + beta * kl_loss`).
+Since cyclical annealing makes `beta` cycle between its ramp-fraction low point and 1.0, that raw total is
+only comparable *within* the same phase of a cycle -- comparing across phases will always favor whichever
+epoch has the lowest beta, independent of model quality. Confirmed in the log: every "saved best
+checkpoint" event landed on exactly the first epoch of a cycle (epoch 1, 11, 21 -- each right after a beta
+reset), never anywhere else. The checkpoint that got kept was essentially an arbitrary early snapshot, not
+the best-trained one. Fixed by selecting on reconstruction loss alone (`recon_loss`, unweighted by beta,
+now logged every epoch as `train_recon`/`val_recon`) instead of the raw total -- `losses.py`'s `cvae_loss`
+now also returns `recon_loss` in its parts dict for this purpose. **The KL numbers above are from *before*
+this fix**, so they should be treated as provisional -- worth retraining again with the corrected
+selection criterion before drawing a final conclusion either way.
+
 ## "Trade confidence" redesign (alias: **trade confidence**) -- gated on the posterior-collapse retrain above
 
 **Contingent on the CVAE posterior-collapse fix directly above.** Only worth pursuing once that retrain
