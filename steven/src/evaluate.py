@@ -1,10 +1,16 @@
-"""Evaluate PatchTST and the CVAE on the same fixed test window set.
+"""Walk-forward backtest of PatchTST vs. CVAE over the SPY test period.
+
+Replays the test period once, in real chronological order, one decision at a time --
+the way an actual trading account would experience it -- rather than evaluating a large
+batch of independently-sampled windows (an earlier version of this script did both; the
+random-sample version was dropped as uninformative once the walk-forward backtest below
+existed: overlapping windows, no real equity curve, and no way to reuse for the
+sample-plot illustrations without a second, disconnected population).
 
 Usage:
     python steven/src/evaluate.py \\
         --patchtst-checkpoint steven/outputs/patchtst_checkpoint.pt \\
-        --cvae-checkpoint steven/outputs/cvae_checkpoint.pt \\
-        --n-test-windows 300 --num-plot-windows-per-bucket 2
+        --cvae-checkpoint steven/outputs/cvae_checkpoint.pt
 """
 
 from __future__ import annotations
@@ -20,7 +26,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -28,16 +33,14 @@ import mplfinance as mpf
 
 from src.data_pipeline import (
     HORIZON,
-    WindowDataset,
-    WindowSampler,
+    MAX_CONTEXT,
     build_dataset,
-    context_bucket,
+    build_window,
     exit_price_from_components,
     extract_arrays,
     max_close_from_components,
     per_bar_close_return,
     reconstruct_prices,
-    reconstruct_volume,
     shrink_components,
     to_patchtst_input,
     train_exit_return_bound,
@@ -48,17 +51,14 @@ from src.models.patchtst import PatchTST
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
 
-BUCKETS = ["narrow", "moderate", "wide"]  # lookback-window size -- see context_bucket
-BACKTEST_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.9]
+WALK_FORWARD_CTX_BARS = MAX_CONTEXT  # 70 -- see the walk-forward module note below
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--patchtst-checkpoint", type=str, default="steven/outputs/patchtst_checkpoint.pt")
     p.add_argument("--cvae-checkpoint", type=str, default="steven/outputs/cvae_checkpoint.pt")
-    p.add_argument("--n-test-windows", type=int, default=3000)
-    p.add_argument("--num-samples", type=int, default=5)
-    p.add_argument("--num-plot-samples", type=int, default=5)
+    p.add_argument("--num-samples", type=int, default=5, help="K sampled draws per CVAE decision.")
     p.add_argument("--device", type=str, default="auto")
     p.add_argument("--metrics-out", type=str, default="steven/outputs/metrics.json")
     p.add_argument("--plots-dir", type=str, default="steven/outputs/sample_plots")
@@ -67,7 +67,7 @@ def parse_args() -> argparse.Namespace:
         "--sell-bound-percentile", type=float, default=99.0,
         help="Percentile (over train data) of |close_0-anchored log return| used to shrink predicted "
         "price components -- a tighter, empirically-calibrated bound on top of the model's own "
-        "MAX_LOG_RETURN, applied to metrics/backtest/plots alike. See train_exit_return_bound.",
+        "MAX_LOG_RETURN, applied everywhere. See train_exit_return_bound.",
     )
     p.add_argument(
         "--cvae-sell-quantile", type=float, default=70.0,
@@ -78,10 +78,20 @@ def parse_args() -> argparse.Namespace:
         "forecast), so it uses the max of its 3 predicted closes instead (see "
         "max_close_from_components).",
     )
-    p.add_argument("--batch-size", type=int, default=256)
-    # default 0: benchmarked in steven/configs/patchtst.yaml -- DataLoader multiprocessing
-    # is slower here, not faster, since build_window() is cheap numpy per sample.
-    p.add_argument("--num-workers", type=int, default=0)
+    p.add_argument(
+        "--confidence-threshold", type=float, default=0.5,
+        help="Confidence threshold used by the walk-forward backtest (see run_walk_forward). This "
+        "changes which decisions actually get made along the way (trade vs. skip 1 bar), so it's a "
+        "single fixed value rather than a sweep -- a different threshold produces a genuinely "
+        "different simulated path, not just a different slice of the same one.",
+    )
+    p.add_argument(
+        "--min-return-threshold", type=float, default=0.001,
+        help="Minimum model-predicted exit return (fraction, e.g. 0.001 = 0.1%%) required to bother "
+        "trading at all, on top of the plain target>buy eligibility check -- filters out trades with "
+        "a technically-positive but trivially small predicted edge (see the 'skipped' case in "
+        "classify_walk_forward_decision). A first-pass heuristic, not swept/tuned yet.",
+    )
     return p.parse_args()
 
 
@@ -95,155 +105,14 @@ def resolve_device(name: str) -> torch.device:
     return torch.device(name)
 
 
-def collate(batch: list[dict]) -> dict:
-    context, patch_pad = zip(*(to_patchtst_input(b["masked_tensor"].numpy()) for b in batch))
-    return {
-        "masked_tensor": torch.stack([b["masked_tensor"] for b in batch]),
-        "context": torch.stack([torch.from_numpy(c) for c in context]),
-        "patch_key_padding_mask": torch.stack([torch.from_numpy(m) for m in patch_pad]),
-        "y": torch.stack([b["y"] for b in batch]),
-        "close_0": torch.tensor([b["close_0"] for b in batch], dtype=torch.float64),
-        "ctx_bars": torch.tensor([b["ctx_bars"] for b in batch], dtype=torch.int64),
-    }
-
-
-def mae_rmse(pred: np.ndarray, true: np.ndarray) -> tuple[float, float]:
-    diff = pred - true
-    mae = float(np.mean(np.abs(diff)))
-    rmse = float(np.sqrt(np.mean(diff**2)))
-    return mae, rmse
-
-
-def directional_accuracy(pred_close_ret: np.ndarray, true_close_ret: np.ndarray) -> np.ndarray:
-    """pred/true_close_ret: (N, 3). Returns (3,) accuracy per horizon step."""
-    return (np.sign(pred_close_ret) == np.sign(true_close_ret)).mean(axis=0)
-
-
-def collect_predictions(patchtst, cvae, loader, device, num_samples):
-    """Runs both models over the fixed test loader, returns flat numpy arrays."""
-    all_true_y, all_pt_y = [], []
-    all_cvae_y = []  # (K, N, 15)
-    all_close0, all_ctx = [], []
-
-    for batch in loader:
-        context = batch["context"].to(device)
-        patch_pad = batch["patch_key_padding_mask"].to(device)
-        masked_tensor = batch["masked_tensor"].to(device)
-        y = batch["y"]
-
-        with torch.no_grad():
-            pt_price, pt_vol = patchtst(context, patch_pad)
-            pt_y = torch.cat([pt_price.reshape(pt_price.shape[0], -1), pt_vol], dim=1)
-
-            cvae_price, cvae_vol = cvae.sample(masked_tensor, k=num_samples)  # (K,B,3,4),(K,B,3)
-            K, B = cvae_price.shape[0], cvae_price.shape[1]
-            cvae_y = torch.cat(
-                [cvae_price.reshape(K, B, -1), cvae_vol], dim=-1
-            )  # (K, B, 15)
-
-        all_true_y.append(y.numpy())
-        all_pt_y.append(pt_y.cpu().numpy())
-        all_cvae_y.append(cvae_y.cpu().numpy())
-        all_close0.append(batch["close_0"].numpy())
-        all_ctx.append(batch["ctx_bars"].numpy())
-
-    true_y = np.concatenate(all_true_y, axis=0)
-    pt_y = np.concatenate(all_pt_y, axis=0)
-    cvae_y = np.concatenate(all_cvae_y, axis=1)  # (K, N, 15)
-    close_0 = np.concatenate(all_close0, axis=0)
-    ctx_bars = np.concatenate(all_ctx, axis=0)
-    return true_y, pt_y, cvae_y, close_0, ctx_bars
-
-
-def metrics_for_slice(true_y, pt_y, cvae_y, close_0, stats) -> dict:
-    """true_y/pt_y: (N,15). cvae_y: (K,N,15). close_0: (N,). Returns a metrics dict."""
-    n = len(true_y)
-    if n == 0:
-        return {"n_windows": 0}
-
-    true_price = true_y[:, :12].reshape(n, 3, 4)
-    true_vol_norm = true_y[:, 12:15]
-    pt_price = pt_y[:, :12].reshape(n, 3, 4)
-    pt_vol_norm = pt_y[:, 12:15]
-    cvae_price_mean = cvae_y[..., :12].reshape(cvae_y.shape[0], n, 3, 4).mean(axis=0)
-    cvae_vol_mean = cvae_y[..., 12:15].mean(axis=0)
-
-    out = {"n_windows": n}
-
-    # reparam-target MAE/RMSE (15-dim vector directly)
-    out["patchtst_reparam_mae_rmse"] = mae_rmse(pt_y, true_y)
-    out["cvae_reparam_mae_rmse"] = mae_rmse(cvae_y.mean(axis=0), true_y)
-
-    # reconstructed OHLCV MAE/RMSE
-    true_ohlc = reconstruct_prices(true_price, close_0)
-    pt_ohlc = reconstruct_prices(pt_price, close_0)
-    cvae_ohlc = reconstruct_prices(cvae_price_mean, close_0)
-    out["patchtst_ohlc_mae_rmse"] = mae_rmse(pt_ohlc, true_ohlc)
-    out["cvae_ohlc_mae_rmse"] = mae_rmse(cvae_ohlc, true_ohlc)
-
-    true_vol = reconstruct_volume(true_vol_norm, stats)
-    pt_vol = reconstruct_volume(pt_vol_norm, stats)
-    cvae_vol = reconstruct_volume(cvae_vol_mean, stats)
-    out["patchtst_volume_mae_rmse"] = mae_rmse(pt_vol, true_vol)
-    out["cvae_volume_mae_rmse"] = mae_rmse(cvae_vol, true_vol)
-
-    # directional accuracy on close_0-anchored close return, per horizon step
-    true_close_ret = true_price[:, :, 0] + true_price[:, :, 1]  # open_ret + body_ret
-    pt_close_ret = pt_price[:, :, 0] + pt_price[:, :, 1]
-    cvae_close_ret = cvae_price_mean[:, :, 0] + cvae_price_mean[:, :, 1]
-    out["patchtst_directional_accuracy"] = directional_accuracy(pt_close_ret, true_close_ret).tolist()
-    out["cvae_directional_accuracy"] = directional_accuracy(cvae_close_ret, true_close_ret).tolist()
-
-    # CVAE sample spread vs realized variance of true close price, per horizon step
-    cvae_price_samples = cvae_y[..., :12].reshape(cvae_y.shape[0], n, 3, 4)
-    cvae_close_price_samples = reconstruct_prices(cvae_price_samples, close_0)[..., 3]  # (K, N, 3)
-    sample_var_per_window = cvae_close_price_samples.var(axis=0)  # (N, 3)
-    avg_sample_var = sample_var_per_window.mean(axis=0)  # (3,)
-    realized_var = true_ohlc[..., 3].var(axis=0)  # (3,) cross-window variance of true close
-    out["cvae_avg_sample_variance"] = avg_sample_var.tolist()
-    out["realized_close_variance"] = realized_var.tolist()
-    out["cvae_spread_to_realized_ratio"] = (avg_sample_var / np.maximum(realized_var, 1e-12)).tolist()
-
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Long-only selective backtest
-#
-# Entry is always close_0 (real, known). Exit is a take-profit-only limit order (see
-# take_profit_exit): the 3 real horizon bars are walked in order, and if any bar's real
-# [low,high] range reaches the take-profit price, the order fills there; otherwise the
-# position is force-closed at the 3rd bar's real close (expiry). An earlier pass added a
-# mirrored 1:1 stop-loss (a "bracket order") on top of this, but it was removed after the
-# backtest showed CVAE's stop-loss rate exceeding its take-profit rate at low thresholds
-# (32.3% vs 29.0% at 0.5) -- once the recalibrated take-profit sits close enough to entry
-# to be realistic, an equally-close mirrored stop is also close enough for ordinary
-# intrabar noise to trigger it, and the pessimistic same-bar tie-break (stop wins on
-# overlap) then converts many of those into guaranteed losses rather than gains. See
-# backlog.md for the bracket-order variant if it's worth revisiting with an asymmetric
-# risk:reward instead of 1:1. Each model's own confidence score decides which windows are
-# worth trading at all; the realized return used for PnL always comes from ground truth,
-# never predictions.
-# ---------------------------------------------------------------------------
-
-
-def percentile_rank(values: np.ndarray) -> np.ndarray:
-    """0..1 rank (0 = smallest). Used to put PatchTST's point-forecast magnitude on the
-    same [0,1] threshold scale as CVAE's sample-agreement fraction."""
-    n = len(values)
-    if n <= 1:
-        return np.zeros(n)
-    order = np.argsort(values)
-    ranks = np.empty(n)
-    ranks[order] = np.arange(n)
-    return ranks / (n - 1)
-
-
 def cvae_confidence_scores(cvae_price_samples: np.ndarray, close_0: np.ndarray) -> np.ndarray:
     """cvae_price_samples: (K,N,3,4). Returns (N,): fraction of the K sampled paths
     whose predicted exit price comes out above close_0. ~1 = strong sample consensus on
     an upward exit, ~0.5 = samples disagree (chop), ~0 = consensus downtrend -- one
-    score captures all three of the "don't trade this" cases at once."""
+    score captures all three of the "don't trade this" cases at once. Unlike PatchTST's
+    confidence (see patchtst_walk_forward_confidence), this is inherently a per-window
+    quantity -- no cross-window ranking needed -- so it works unmodified whether called on
+    a batch or one window (N=1) at a time."""
     if cvae_price_samples.shape[1] == 0:
         return np.empty(0)
     exit_prices = exit_price_from_components(cvae_price_samples, close_0)  # (K, N)
@@ -251,34 +120,16 @@ def cvae_confidence_scores(cvae_price_samples: np.ndarray, close_0: np.ndarray) 
     return (sample_return > 0).mean(axis=0)
 
 
-def patchtst_confidence_scores(pt_price: np.ndarray, close_0: np.ndarray) -> np.ndarray:
-    """pt_price: (N,3,4). PatchTST has no sample distribution, so: (1) require all 3
-    predicted bar-close-returns to agree on the up direction (else auto-dismissed as
-    choppy/down -- confidence 0), (2) rank surviving windows by predicted exit-return
-    magnitude and convert to a [0,1] percentile, matching CVAE's threshold scale."""
-    n = len(pt_price)
-    if n == 0:
-        return np.empty(0)
-    coherent_up = (per_bar_close_return(pt_price) > 0).all(axis=1)
-    exit_price = exit_price_from_components(pt_price, close_0)
-    predicted_exit_return = exit_price / close_0 - 1.0
-
-    confidence = np.zeros(n)
-    if coherent_up.any():
-        confidence[coherent_up] = percentile_rank(predicted_exit_return[coherent_up])
-    return confidence
-
-
 def take_profit_exit(
     true_ohlc: np.ndarray, take_profit: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     """Simulates a take-profit-only limit order (no stop-loss -- see the module note
-    above for why) placed at the same time as the close_0 buy. Walks the 3 REAL horizon
-    bars in order; the first bar whose real [low,high] range reaches take_profit fills
-    the order there. If it's never reached across all 3 bars, the position is
-    force-closed at the 3rd bar's real close instead (order expiry). true_ohlc: (N,3,4)
-    real [open,high,low,close]. take_profit: (N,). Returns (realized_sell_price (N,),
-    hit_take_profit (N,) bool)."""
+    above run_walk_forward for why) placed at the same time as the close_0 buy. Walks the
+    3 REAL horizon bars in order; the first bar whose real [low,high] range reaches
+    take_profit fills the order there. If it's never reached across all 3 bars, the
+    position is force-closed at the 3rd bar's real close instead (order expiry).
+    true_ohlc: (N,3,4) real [open,high,low,close]. take_profit: (N,). Returns
+    (realized_sell_price (N,), hit_take_profit (N,) bool)."""
     n = true_ohlc.shape[0]
     low = true_ohlc[:, :, 2]
     high = true_ohlc[:, :, 1]
@@ -296,118 +147,75 @@ def take_profit_exit(
     return sell_price, hit_take_profit
 
 
-CASE_LABELS = ["win_take_profit", "win_expiry", "no_trade", "lose_expiry"]
+CASE_LABELS = ["win_take_profit", "win_expiry", "lose_expiry", "skipped", "no_trade"]
 CASE_TITLES = {
     "win_take_profit": "Win -- take-profit hit",
     "win_expiry": "Win -- expiry (gain)",
-    "no_trade": "No trade (target <= buy)",
     "lose_expiry": "Lose -- expiry (loss)",
+    "skipped": "Skipped (low confidence or return too small)",
+    "no_trade": "No trade (target <= buy)",
 }
 
 
-def classify_outcomes(
-    eligible: np.ndarray, hit_take_profit: np.ndarray, trade_return: np.ndarray
-) -> np.ndarray:
-    """Sorts every window into exactly one of CASE_LABELS, independent of any confidence
-    threshold: 'win_take_profit' (target reached), 'win_expiry' (target missed but the
-    forced 3rd-candle close still came in above buy), 'no_trade' (this model's own
-    target never cleared the buy price, so no trade would ever be placed regardless of
-    confidence), 'lose_expiry' (target missed and the forced close came in at/below buy).
-    eligible/hit_take_profit: (N,) bool. trade_return: (N,) fraction, meaningful only
-    where eligible (see take_profit_exit -- it still runs unconditionally, but a
-    not-eligible window's return is never actually realized as a trade). Returns (N,)
-    array of dtype=object strings."""
-    labels = np.full(eligible.shape, "no_trade", dtype=object)
-    entered = eligible
-    labels[entered & hit_take_profit] = "win_take_profit"
-    expired = entered & ~hit_take_profit
-    labels[expired & (trade_return > 0)] = "win_expiry"
-    labels[expired & (trade_return <= 0)] = "lose_expiry"
-    return labels
+def classify_walk_forward_decision(
+    eligible: bool, meets_return_threshold: bool, confident_enough: bool,
+    hit_take_profit: bool, trade_return: float,
+) -> tuple[str, bool]:
+    """Sorts one walk-forward decision point into exactly one of CASE_LABELS. Returns
+    (label, would_trade) -- would_trade is eligible AND meets_return_threshold AND
+    confident_enough, and is exactly the condition run_walk_forward uses to decide
+    whether to actually place the trade (and therefore lock out the next HORIZON bars).
+
+    Two distinct reasons never make it to a trade: 'no_trade' (this model's own take-profit
+    target never even clears the buy price -- no expected upside at all, confidence and
+    predicted-return-size are irrelevant) and 'skipped' (the target does clear the buy
+    price, but the predicted edge is smaller than min_return_threshold and/or the model
+    isn't confident enough). An earlier version of this backtest only had 'no_trade' and
+    silently folded every confidence/return-gated skip into whichever win/lose label the
+    window would have gotten *had* it been traded -- which answered "what if everything
+    eligible were always traded" rather than "what actually happened," and made a highly
+    selective model look like it was winning/losing trades it never actually placed."""
+    if not eligible:
+        return "no_trade", False
+    if not (meets_return_threshold and confident_enough):
+        return "skipped", False
+    if hit_take_profit:
+        return "win_take_profit", True
+    return ("win_expiry" if trade_return > 0 else "lose_expiry"), True
 
 
 def outcome_breakdown(labels: np.ndarray) -> dict:
-    """labels: (N,) from classify_outcomes. Returns {case: fraction of all N windows in
-    that case} -- rows sum to 1.0 (or empty dict if N=0). Reported once per model,
-    independent of confidence threshold: a 'no_trade' window is excluded from every
-    threshold's selection by construction (see sweep_thresholds' eligible mask), so it
-    can never appear as a row inside the threshold-swept table -- this is the only place
-    it's visible at all."""
+    """labels: (N,) from classify_walk_forward_decision. Returns {case: fraction of all N
+    decisions in that case} -- rows sum to 1.0 (or empty dict if N=0)."""
     n = len(labels)
     if n == 0:
         return {}
     return {case: float((labels == case).mean()) for case in CASE_LABELS}
 
 
-def model_trade_outcomes(true_ohlc: np.ndarray, take_profit: np.ndarray, close_0: np.ndarray) -> dict:
-    """Bundles one model's full per-window take-profit-exit outcome against real price
-    action -- shared by run_backtest (for the threshold sweep + case breakdown) and
-    make_plots (to pick illustrative examples of each case). true_ohlc: (N,3,4) real
-    [open,high,low,close]. take_profit, close_0: (N,). Returns a dict of (N,)-shaped
-    arrays: sell_price, hit_take_profit, trade_return, eligible, label."""
-    sell_price, hit_take_profit = take_profit_exit(true_ohlc, take_profit)
-    trade_return = sell_price / close_0 - 1.0
-    eligible = take_profit > close_0
-    label = classify_outcomes(eligible, hit_take_profit, trade_return)
-    return {
-        "sell_price": sell_price,
-        "hit_take_profit": hit_take_profit,
-        "trade_return": trade_return,
-        "eligible": eligible,
-        "label": label,
-    }
-
-
 def nearest_draw_index(draw_exit_prices: np.ndarray, target: float) -> int:
     """draw_exit_prices: (K,) each of CVAE's K sampled draws' own exit_price_from_components
     value for one window. target: the take-profit price actually used for that window (a
-    percentile across all K draws -- see main()/run_backtest -- not tied to any single
+    percentile across all K draws -- see make_cvae_predict_fn -- not tied to any single
     draw). Returns the index of whichever draw's own exit price is closest to target --
-    used by make_plots to pick one illustrative draw to render as candles that's visually
-    consistent with a target that's really a statistic over the whole ensemble."""
+    so the one rendered/reported is visually consistent with a target that's really a
+    statistic over the whole ensemble."""
     return int(np.argmin(np.abs(draw_exit_prices - target)))
 
 
-def sweep_thresholds(
-    confidence: np.ndarray, trade_return: np.ndarray, thresholds: list[float],
-    hit_take_profit: np.ndarray | None = None,
-    eligible: np.ndarray | None = None,
-) -> list[dict]:
-    """eligible, if given, is an (N,) bool mask ANDed into every threshold's selection --
-    used to hard-exclude windows whose own predicted take-profit doesn't even clear the
-    buy price (see run_backtest), regardless of how high their confidence score is."""
-    n = len(confidence)
-    rows = []
-    for th in thresholds:
-        mask = confidence >= th
-        if eligible is not None:
-            mask = mask & eligible
-        k = int(mask.sum())
-        row = {"threshold": th, "n_trades": k, "selectivity": (k / n) if n else 0.0}
-        if k > 0:
-            rets = trade_return[mask]
-            row["win_rate"] = float((rets > 0).mean())
-            row["avg_return"] = float(rets.mean())
-            row["total_return"] = float(rets.sum())
-            row["take_profit_rate"] = float(hit_take_profit[mask].mean()) if hit_take_profit is not None else None
-        else:
-            row["win_rate"] = None
-            row["avg_return"] = None
-            row["total_return"] = None
-            row["take_profit_rate"] = None
-        rows.append(row)
-    return rows
-
-
-def buy_and_hold_benchmark(df: pd.DataFrame, bounds: dict) -> dict:
-    """Naive baseline for the backtest below: buy SPY at the test period's first close,
-    hold to its last close -- no model, no confidence threshold, no trade selectivity.
-    Something to compare the model-driven total/annualized returns against."""
-    test_lo, test_hi = bounds["test"]
-    entry, exit_ = df.iloc[test_lo], df.iloc[test_hi - 1]
-    entry_price, exit_price = float(entry["close"]), float(exit_["close"])
-    total_return = exit_price / entry_price - 1.0
-    elapsed_years = (exit_["datetime"] - entry["datetime"]).days / 365.25
+def equity_stats(
+    df: pd.DataFrame, entry_idx: int, exit_idx: int, entry_price: float, exit_price: float, total_return: float
+) -> dict:
+    """Shared entry/exit date + annualized-return bookkeeping for every benchmark/strategy
+    below (buy-and-hold, the naive periodic benchmark, and each model's walk-forward run) --
+    so every one of them is reported in the same shape and can be dropped into the same
+    comparison table regardless of how its own total_return was actually produced."""
+    entry, exit_ = df.iloc[entry_idx], df.iloc[exit_idx]
+    # total_seconds(), not .days -- .days truncates to 0 for any exit less than 24h after
+    # entry (routine for a single naive-periodic/walk-forward trade block), which would
+    # divide by zero below. Every caller here spans real chronological bars from the same
+    # df, so exit_idx > entry_idx guarantees a strictly positive elapsed time.
+    elapsed_years = (exit_["datetime"] - entry["datetime"]).total_seconds() / (365.25 * 86400)
     annual_return = (1.0 + total_return) ** (1.0 / elapsed_years) - 1.0
     return {
         "entry_date": str(entry["datetime"].date()),
@@ -420,67 +228,255 @@ def buy_and_hold_benchmark(df: pd.DataFrame, bounds: dict) -> dict:
     }
 
 
-def run_backtest(
-    true_y: np.ndarray, pt_y: np.ndarray, cvae_y: np.ndarray, close_0: np.ndarray,
-    cvae_sell_quantile: float = 70.0,
+def buy_and_hold_benchmark(df: pd.DataFrame, entry_idx: int, exit_idx: int) -> dict:
+    """Naive baseline: buy SPY at entry_idx's close, hold to exit_idx's close -- no model,
+    no confidence threshold, no trade selectivity. entry_idx is the caller's choice so this
+    lines up with the walk-forward's own first tradeable decision point (see main()) --
+    not the test split's literal first bar."""
+    entry_price = float(df.iloc[entry_idx]["close"])
+    exit_price = float(df.iloc[exit_idx]["close"])
+    total_return = exit_price / entry_price - 1.0
+    return equity_stats(df, entry_idx, exit_idx, entry_price, exit_price, total_return)
+
+
+def naive_periodic_benchmark(df: pd.DataFrame, closes: np.ndarray, t0: int, test_hi: int) -> dict:
+    """No model, no signal: tiles the test range in non-overlapping 3-bar (HORIZON) blocks
+    starting right after t0 (the same anchor the walk-forward strategies use) -- buy at the
+    close of each block's 1st bar, sell at the close of its 3rd, then immediately start the
+    next block (buy(t0+1)/sell(t0+3), buy(t0+4)/sell(t0+6), ...). Always trades, every
+    block, unconditionally -- no take-profit target, no confidence gate, no expiry logic.
+    Same trade cadence/shape as the walk-forward strategies (one round trip per
+    HORIZON-bar block) but zero selectivity, to check whether the models' confidence-gated
+    entries actually beat blind periodic exposure to the same instrument. Equity compounds
+    block to block, same as run_walk_forward."""
+    equity = 1.0
+    trades: list[dict] = []
+    k = 0
+    while True:
+        buy_idx, sell_idx = t0 + 3 * k + 1, t0 + 3 * k + 3
+        if sell_idx >= test_hi:
+            break
+        buy_price, sell_price = float(closes[buy_idx]), float(closes[sell_idx])
+        trade_return = sell_price / buy_price - 1.0
+        equity *= 1.0 + trade_return
+        trades.append({"buy_idx": buy_idx, "sell_idx": sell_idx, "buy_price": buy_price, "trade_return": trade_return})
+        k += 1
+
+    out = {"n_trades": len(trades), "total_return": equity - 1.0}
+    if not trades:
+        out.update(win_rate=None, take_profit_rate=None, avg_return=None)
+        return out
+    rets = np.array([t["trade_return"] for t in trades])
+    out["win_rate"] = float((rets > 0).mean())
+    out["take_profit_rate"] = None  # no take-profit order in this strategy at all
+    out["avg_return"] = float(rets.mean())
+    out.update(equity_stats(
+        df, trades[0]["buy_idx"], trades[-1]["sell_idx"],
+        trades[0]["buy_price"], float(closes[trades[-1]["sell_idx"]]), out["total_return"],
+    ))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward backtest -- a realistic, sequential simulation
+#
+# Walks the test range in real chronological order, one hour at a time, always using the
+# max context length (WALK_FORWARD_CTX_BARS=70): "a trader checks in every hour with the
+# most recent 70 candles." No trade -> advance 1 bar and re-check next hour. Trade -> lock
+# out the next HORIZON bars regardless of whether/when the take-profit fills within them
+# (an intentional simplification so the next decision point is always exactly 3 bars after
+# the last, whether that trade won early, won late, or lost), then resume. Equity compounds
+# trade to trade starting from 1.0, so total_return is a real simulated account balance
+# over time, never a sum across possibly-overlapping trades.
+#
+# The first decision point is the earliest start_idx with a full 70-bar context entirely
+# inside the test split (no candle before the test period is ever used), so it lands
+# ~WALK_FORWARD_CTX_BARS/7 trading days after the test split's first bar -- the
+# buy-and-hold and naive-periodic benchmarks are deliberately anchored to that same point
+# (see main()) rather than the test split's literal first bar, so every number in the
+# comparison table covers the identical calendar span.
+#
+# PatchTST's confidence score needs special handling: it has no sample distribution, so
+# its "how big a move, relative to what this model usually predicts" score has to be a
+# rank against *some* reference population of past predicted-move magnitudes. Ranking
+# against a big batch of independently-sampled windows (an earlier version did this) is a
+# subtle lookahead bug: at the very first decision in January, you'd already be ranking
+# against predictions the model makes on data from as late as May -- information a live
+# trader would not have yet. patchtst_walk_forward_confidence instead ranks each decision
+# against an *online, expanding* reference built purely from this same walk's own prior
+# decisions, in chronological order -- nothing from the future ever leaks in.
+# ---------------------------------------------------------------------------
+
+
+def patchtst_walk_forward_confidence(
+    pt_price: np.ndarray, close_0: np.ndarray, magnitude_reference: list[float]
+) -> float:
+    """Single-decision-point confidence: (1) require all 3 predicted bar-close-returns to
+    agree on the up direction (else auto-dismissed as choppy/down -- confidence 0), (2)
+    rank the predicted exit-return magnitude against magnitude_reference, an ONLINE,
+    expanding list of every prior coherent-up decision's own predicted magnitude from this
+    same walk (see the module note above) -- not a separate batch, so nothing from the
+    future ever leaks into a live decision's confidence. `magnitude_reference` is mutated
+    in place: this window's own value is appended AFTER computing its rank, so later
+    decisions can rank against it but it never ranks against itself. The very first
+    coherent-up decision of the whole walk has nothing to rank against yet, so confidence
+    defaults to a neutral 0.5 rather than 0.0 (which a naive percentile rank of an empty/
+    singleton reference would give, silently zeroing out early trading opportunities)."""
+    coherent_up = bool((per_bar_close_return(pt_price) > 0).all(axis=1)[0])
+    if not coherent_up:
+        return 0.0
+    predicted_exit_return = float(exit_price_from_components(pt_price, close_0)[0] / close_0[0] - 1.0)
+    confidence = float(np.mean(np.array(magnitude_reference) <= predicted_exit_return)) if magnitude_reference else 0.5
+    magnitude_reference.append(predicted_exit_return)
+    return confidence
+
+
+def make_patchtst_predict_fn(patchtst, device: torch.device, sell_bound: float):
+    """Returns a predict(w) -> {take_profit, confidence, price} closure, single-window
+    (batch=1) at a time. `price` is this decision's own predicted (3,4) price components,
+    kept around so make_plots can render exactly what this model predicted at this
+    decision without re-running inference later (see make_plots' module note). Maintains
+    its own magnitude_reference list across calls (see patchtst_walk_forward_confidence) --
+    one closure instance = one independent walk = one independent reference."""
+    magnitude_reference: list[float] = []
+
+    def predict(w: dict) -> dict:
+        context, patch_pad = to_patchtst_input(w["masked_tensor"])
+        context_t = torch.from_numpy(context)[None].to(device)
+        patch_pad_t = torch.from_numpy(patch_pad)[None].to(device)
+        with torch.no_grad():
+            pt_price_t, _ = patchtst(context_t, patch_pad_t)
+        pt_price = shrink_components(pt_price_t.cpu().numpy(), sell_bound)  # (1,3,4)
+        close_0 = np.array([w["close_0"]])
+        take_profit = float(max_close_from_components(pt_price, close_0)[0])
+        confidence = patchtst_walk_forward_confidence(pt_price, close_0, magnitude_reference)
+        return {"take_profit": take_profit, "confidence": confidence, "price": pt_price[0]}
+
+    return predict
+
+
+def make_cvae_predict_fn(
+    cvae, device: torch.device, sell_bound: float, num_samples: int, cvae_sell_quantile: float
+):
+    """Returns a predict(w) -> {take_profit, confidence, price} closure, single-window
+    (batch=1) at a time. `price` is whichever of the K sampled draws' own exit price is
+    closest to the take-profit target actually used (see nearest_draw_index) -- chosen
+    right here, at generation time, using the exact RNG draws this decision consumed, so
+    later re-rendering it in make_plots never risks a different (freshly re-sampled) set
+    of draws implying a different target/outcome than the one that actually decided this
+    window's case label."""
+
+    def predict(w: dict) -> dict:
+        masked_t = torch.from_numpy(w["masked_tensor"])[None].to(device)
+        with torch.no_grad():
+            cvae_price_t, _ = cvae.sample(masked_t, k=num_samples)  # (K,1,3,4)
+        cvae_price = shrink_components(cvae_price_t.cpu().numpy(), sell_bound)
+        close_0 = np.array([w["close_0"]])
+        exit_prices = exit_price_from_components(cvae_price, close_0)  # (K,1)
+        take_profit = float(np.percentile(exit_prices[:, 0], cvae_sell_quantile))
+        confidence = float(cvae_confidence_scores(cvae_price, close_0)[0])
+        draw_idx = nearest_draw_index(exit_prices[:, 0], take_profit)
+        return {"take_profit": take_profit, "confidence": confidence, "price": cvae_price[draw_idx, 0]}
+
+    return predict
+
+
+def run_walk_forward(
+    predict_fn, feat: np.ndarray, opens: np.ndarray, closes: np.ndarray,
+    test_lo: int, test_hi: int, confidence_threshold: float, min_return_threshold: float,
 ) -> dict:
-    """true_y/pt_y: (N,15). cvae_y: (K,N,15). close_0: (N,)."""
-    n = len(true_y)
-    note = (
-        "long-only take-profit backtest (no stop-loss -- an earlier 1:1 mirrored bracket "
-        "was removed after it was found to lose more often than it won once the "
-        "recalibrated take-profit sat close enough to entry for ordinary intrabar noise "
-        "to trigger the mirrored stop; see the module comment above run_backtest): "
-        "entry=close_0 (real). Each model's own predicted take-profit price is placed as "
-        "a limit sell order at the same time as entry. PatchTST's take-profit is the max "
-        "of its predicted 3 horizon bars' own closes (single point forecast, no "
-        f"distribution to draw a quantile from -- see max_close_from_components); CVAE's "
-        f"is the p{cvae_sell_quantile:.0f} percentile of its K sampled draws' own "
-        "predicted exit prices, since CVAE actually has a sampled distribution to pick a "
-        "target from. A window is only ever eligible to trade if its own take-profit "
-        "clears the buy price -- confidence alone can't override this. The 3 REAL "
-        "horizon bars are then walked in order (see take_profit_exit): if any bar's real "
-        "[low,high] range reaches the take-profit, the order fills there; if it's never "
-        "reached, the position is force-closed at the 3rd REAL bar's close (order "
-        "expiry). total_return is summed across selected trades -- test windows are "
-        "independently sampled and can overlap in calendar time, so this is not a "
-        "sequential equity curve."
-    )
-    if n == 0:
-        return {
-            "note": note, "patchtst": [], "cvae": [],
-            "patchtst_outcome_breakdown": {}, "cvae_outcome_breakdown": {},
+    """predict_fn(w: dict) -> {take_profit, confidence, price} is model-specific -- see
+    make_patchtst_predict_fn/make_cvae_predict_fn. Returns {trades, decisions,
+    equity_final}: `decisions` is every decision point visited (traded or not), each
+    classified into one of CASE_LABELS (see classify_walk_forward_decision) and carrying
+    everything make_plots needs to render it later (price components, real OHLC, buy/sell
+    prices) without re-running inference; `trades` is the subset that actually got
+    traded -- disjoint models can and do follow different real-time paths here, since a
+    trade vs. no-trade call changes how far this model's own clock advances next."""
+    start_idx = test_lo
+    equity = 1.0
+    trades: list[dict] = []
+    decisions: list[dict] = []
+
+    while start_idx + WALK_FORWARD_CTX_BARS + HORIZON <= test_hi:
+        w = build_window(feat, opens, closes, start_idx, WALK_FORWARD_CTX_BARS)
+        close_0 = w["close_0"]
+        true_price = w["y"][:12].reshape(1, 3, 4)
+        true_ohlc = reconstruct_prices(true_price, np.array([close_0]))[0]
+
+        pred = predict_fn(w)
+        take_profit, confidence, price = pred["take_profit"], pred["confidence"], pred["price"]
+        predicted_return = take_profit / close_0 - 1.0
+        eligible = take_profit > close_0
+        meets_return_threshold = predicted_return >= min_return_threshold
+        confident_enough = confidence >= confidence_threshold
+
+        sell_price_arr, hit_tp_arr = take_profit_exit(true_ohlc[None], np.array([take_profit]))
+        sell_price, hit_tp = float(sell_price_arr[0]), bool(hit_tp_arr[0])
+        trade_return = float(sell_price / close_0 - 1.0)
+        label, would_trade = classify_walk_forward_decision(
+            eligible, meets_return_threshold, confident_enough, hit_tp, trade_return
+        )
+
+        decision = {
+            "start_idx": start_idx,
+            "close_0": float(close_0),
+            "take_profit": float(take_profit),
+            "confidence": float(confidence),
+            "price": price,  # (3,4) predicted components, for plotting
+            "true_ohlc": true_ohlc,  # (3,4) real components, for plotting
+            "label": label,
+            "would_trade": would_trade,
+            "sell_price": sell_price,
+            "hit_take_profit": hit_tp,
+            "trade_return": trade_return,
         }
+        decisions.append(decision)
 
-    true_price = true_y[:, :12].reshape(n, 3, 4)
-    pt_price = pt_y[:, :12].reshape(n, 3, 4)
-    cvae_price_samples = cvae_y[..., :12].reshape(cvae_y.shape[0], n, 3, 4)
+        if would_trade:
+            equity *= 1.0 + trade_return
+            trades.append(decision)
+            start_idx += HORIZON
+        else:
+            start_idx += 1
 
-    true_ohlc = reconstruct_prices(true_price, close_0)  # (N,3,4) real [open,high,low,close]
+    return {"trades": trades, "decisions": decisions, "equity_final": equity}
 
-    pt_take_profit = max_close_from_components(pt_price, close_0)  # (N,)
-    cvae_exit_prices = exit_price_from_components(cvae_price_samples, close_0)  # (K,N)
-    cvae_take_profit = np.percentile(cvae_exit_prices, cvae_sell_quantile, axis=0)  # (N,)
 
-    pt_outcomes = model_trade_outcomes(true_ohlc, pt_take_profit, close_0)
-    cvae_outcomes = model_trade_outcomes(true_ohlc, cvae_take_profit, close_0)
-
-    cvae_conf = cvae_confidence_scores(cvae_price_samples, close_0)
-    pt_conf = patchtst_confidence_scores(pt_price, close_0)
-
-    return {
-        "note": note,
-        "patchtst": sweep_thresholds(
-            pt_conf, pt_outcomes["trade_return"], BACKTEST_THRESHOLDS,
-            pt_outcomes["hit_take_profit"], pt_outcomes["eligible"],
-        ),
-        "cvae": sweep_thresholds(
-            cvae_conf, cvae_outcomes["trade_return"], BACKTEST_THRESHOLDS,
-            cvae_outcomes["hit_take_profit"], cvae_outcomes["eligible"],
-        ),
-        "patchtst_outcome_breakdown": outcome_breakdown(pt_outcomes["label"]),
-        "cvae_outcome_breakdown": outcome_breakdown(cvae_outcomes["label"]),
+def walk_forward_stats(df: pd.DataFrame, result: dict) -> dict:
+    """Reduces run_walk_forward's raw trade/decision log into the same reportable shape as
+    buy_and_hold_benchmark/naive_periodic_benchmark, plus the case breakdown across every
+    decision point checked (see outcome_breakdown) -- independent of confidence_threshold
+    and min_return_threshold in the sense that it reports exactly which of the 5 cases
+    each decision landed in, rather than re-deriving anything."""
+    trades, decisions, equity_final = result["trades"], result["decisions"], result["equity_final"]
+    labels = np.array([d["label"] for d in decisions], dtype=object)
+    out = {
+        "n_decisions": len(decisions),
+        "n_trades": len(trades),
+        "outcome_breakdown": outcome_breakdown(labels),
+        "total_return": equity_final - 1.0,
     }
+    if not trades:
+        out.update(win_rate=None, take_profit_rate=None, avg_return=None)
+        return out
+
+    rets = np.array([t["trade_return"] for t in trades])
+    hits = np.array([t["hit_take_profit"] for t in trades])
+    out["win_rate"] = float((rets > 0).mean())
+    out["take_profit_rate"] = float(hits.mean())
+    out["avg_return"] = float(rets.mean())
+
+    first, last = trades[0], trades[-1]
+    entry_idx = first["start_idx"] + WALK_FORWARD_CTX_BARS - 1  # this trade's close_0 bar
+    exit_idx = last["start_idx"] + WALK_FORWARD_CTX_BARS + HORIZON - 1  # last horizon bar
+    out.update(equity_stats(df, entry_idx, exit_idx, first["close_0"], last["sell_price"], out["total_return"]))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Sample plots
+# ---------------------------------------------------------------------------
 
 
 def draw_horizon_box(ax, n_shown: int) -> None:
@@ -541,42 +537,30 @@ def draw_trade_lines(
 
 def trade_table_text(
     ohlc: np.ndarray, buy_price: float, sell_limit: float | None = None,
-    true_horizon_ohlc: np.ndarray | None = None,
-) -> tuple[str, tuple[float, str] | None, bool | None]:
+    would_enter: bool | None = None, realized: tuple[float, str] | None = None,
+) -> str:
     """ohlc: (3,4) [open,high,low,close] for this panel's 3 horizon bars (used for the
-    per-candle numbers in the text table -- always shown, even for the ground truth
-    panel, which passes sell_limit=None since it has no trade decision of its own).
-    sell_limit: this model's own predicted take-profit price, already computed by the
-    caller (max-predicted-close for PatchTST, quantile-based for CVAE -- see
-    run_backtest/make_plots). true_horizon_ohlc, if given, is the REAL 3 horizon bars'
-    [open,high,low,close] -- used to walk the take-profit order (see take_profit_exit)
-    against real price action, but only when would_enter is True: if the model's own
-    target never clears the buy price, no order is ever placed, so there's nothing to
-    realize -- reporting a mechanical "would it have hit anyway" outcome underneath a
-    "NO TRADE" decision would read as contradictory. Returns (annotation text,
-    (realized_price, outcome)-or-None, would_enter-or-None) -- would_enter is
-    sell_limit > buy_price, i.e. whether this model's own predicted target even clears
-    the entry price; the long-only strategy would skip the trade entirely otherwise,
-    regardless of confidence. outcome is one of "take_profit", "expired"."""
+    per-candle numbers in the text table -- always shown). sell_limit: this model's own
+    predicted take-profit price -- None for the ground truth panel and for a model panel
+    the walk-forward never actually evaluated at this exact window (see make_plots).
+    would_enter/realized are the walk-forward's own precomputed decision (see
+    run_walk_forward), passed straight through rather than recomputed here, so this text
+    always matches exactly what the walk actually decided and realized. realized is
+    (realized_price, outcome) where outcome is 'take_profit' or 'expired' -- only
+    meaningful when would_enter is True."""
     lines = [
         f"C1  O={ohlc[0,0]:.2f}  C={ohlc[0,3]:.2f}    "
         f"C2  O={ohlc[1,0]:.2f}  C={ohlc[1,3]:.2f}    "
         f"C3  O={ohlc[2,0]:.2f}  C={ohlc[2,3]:.2f}",
     ]
-    realized = None
-    would_enter = None
     if sell_limit is not None:
         lines.append(f"Buy = {buy_price:.2f}   Take-profit = {sell_limit:.2f}")
-        would_enter = sell_limit > buy_price
-        decision = "ENTER long (target > buy)" if would_enter else "NO TRADE (target <= buy -- no expected upside)"
+        decision = "ENTER long" if would_enter else "NO TRADE / SKIPPED"
         lines.append(f"Trade decision: {decision}")
 
-        if would_enter and true_horizon_ohlc is not None:
-            sell_price, hit_tp = take_profit_exit(true_horizon_ohlc[None, :, :], np.array([sell_limit]))
-            realized_price = float(sell_price[0])
-            outcome = "take_profit" if hit_tp[0] else "expired"
+        if would_enter and realized is not None:
+            realized_price, outcome = realized
             realized_return = (realized_price / buy_price - 1.0) * 100
-            realized = (realized_price, outcome)
             status = {
                 "take_profit": "TAKE PROFIT -> filled at target",
                 "expired": "EXPIRED -> forced exit at real C3 close",
@@ -585,26 +569,19 @@ def trade_table_text(
                 f"vs. real price action: {status}  |  realized sell = {realized_price:.2f}  |  "
                 f"return = {realized_return:+.2f}%"
             )
-    return "\n".join(lines), realized, would_enter
+    return "\n".join(lines)
 
 
 def render_panel(
-    fig,
-    gs_chart,
-    gs_text,
-    sub_df: pd.DataFrame,
-    buy_price: float,
-    title: str,
+    fig, gs_chart, gs_text, sub_df: pd.DataFrame, buy_price: float, title: str,
     sell_targets: list[tuple[str, float, str, str]],
-    true_horizon_ohlc: np.ndarray | None = None,
-    sell_limit: float | None = None,
-) -> tuple[tuple[float, str] | None, bool | None]:
-    """sell_limit is this model's own predicted take-profit price (already computed by
-    the caller -- None for the ground truth panel, which has no trade decision of its
-    own). Returns (realized, would_enter) from trade_table_text -- realized is
-    (realized_price, outcome) when true_horizon_ohlc was given, else None; would_enter is
-    likewise None for the ground truth panel -- so callers that need these (e.g. to log
-    them alongside the plot) don't have to recompute them."""
+    sell_limit: float | None = None, would_enter: bool | None = None,
+    realized: tuple[float, str] | None = None,
+) -> None:
+    """sell_limit/would_enter/realized are the walk-forward's own precomputed decision for
+    this model at this window (None/None/None for the ground truth panel, which has no
+    trade decision of its own, and for a model panel the walk never actually evaluated
+    here -- see make_plots)."""
     ax = fig.add_subplot(gs_chart)
     mpf.plot(sub_df, type="candle", ax=ax, style="yahoo", volume=False)
     ax.set_title(title, fontsize=10)
@@ -612,7 +589,7 @@ def render_panel(
     draw_horizon_box(ax, len(sub_df))
 
     ohlc = sub_df.iloc[-HORIZON:][["open", "high", "low", "close"]].to_numpy()
-    text, realized, would_enter = trade_table_text(ohlc, buy_price, sell_limit, true_horizon_ohlc)
+    text = trade_table_text(ohlc, buy_price, sell_limit, would_enter, realized)
     draw_trade_lines(ax, len(sub_df), buy_price, sell_targets)
 
     if would_enter is not None:
@@ -627,51 +604,48 @@ def render_panel(
     ax_txt = fig.add_subplot(gs_text)
     ax_txt.axis("off")
     ax_txt.text(0.0, 1.0, text, transform=ax_txt.transAxes, ha="left", va="top", fontsize=7.5, family="monospace")
-    return realized, would_enter
 
 
-def make_plots(
-    df, test_pairs, pt_y, cvae_y, close_0, pt_take_profit, cvae_take_profit, cvae_exit_prices, cvae_label, args
-):
-    """Selects 8 illustrative windows from the full fixed test set -- one per (case,
-    context-length) combination, choosing uniformly at random among the windows that
-    match, where case is one of CASE_LABELS and context-length is "narrow" or "wide" (see
-    context_bucket; "moderate" is skipped to keep a clean narrow-vs-wide contrast --
-    named to avoid colliding with "long"/"short" as trading directions elsewhere in this
-    doc, e.g. long-only, ENTER LONG). Cases are categorized by CVAE's own trade outcome;
-    PatchTST's panel on the same figure just
-    shows whatever actually happened on that same window, uncontrolled, so the two
-    models' contrasting behavior on identical real price action is visible side by side.
+def spread(ohlc: np.ndarray) -> float:
+    """max - min of the 3 bars' 6 open/close values -- how wide a candle path is."""
+    return float(ohlc[:, [0, 3]].max() - ohlc[:, [0, 3]].min())
 
-    Reuses the already-computed, already sell_bound-shrunk predictions from the fixed
-    evaluation set (pt_y, cvae_y, close_0, pt_take_profit, cvae_take_profit, cvae_exit_prices,
-    cvae_label -- all computed once in main(), aligned index-for-index with test_pairs)
-    rather than re-running the models on freshly sampled windows: re-sampling CVAE fresh
-    could give a different set of k draws -- and therefore a different take-profit
-    quantile and a different outcome -- than the one that actually earned this window its
-    case label. Only *which* qualifying window is picked per (case, ctx-length) slot is
-    randomized (unseeded, so a different concrete example each run), always from the same
-    fixed, reproducible population used for the metrics/backtest above.
+
+def make_plots(df: pd.DataFrame, pt_decisions: list[dict], cvae_decisions: list[dict], args) -> None:
+    """Selects one illustrative example per CASE_LABELS, sourced from CVAE's own
+    walk-forward decision log (not a separate random-sample population -- an earlier
+    version drew these from an independently-sampled 3000-window batch, which the report
+    dropped as uninformative once the walk-forward became the only backtest; reusing that
+    separate batch here would also mean the illustrated cases could disagree with the
+    walk-forward table's own outcome-breakdown numbers). Cases are categorized by CVAE's
+    own decision; PatchTST's panel on the same figure shows whatever it separately decided
+    at that same real start_idx, uncontrolled.
+
+    PatchTST and CVAE walk independently and can visit different start_idx sequences once
+    their trade/no-trade calls diverge (see run_walk_forward's module note) -- so a given
+    CVAE decision isn't guaranteed to have a matching PatchTST decision at the exact same
+    start_idx. This prefers CVAE candidates where PatchTST does have a decision at that
+    start_idx (so the 3-panel comparison is on identical real price action); if none of a
+    case's CVAE candidates overlap with a PatchTST decision, one is still picked and
+    PatchTST's panel instead shows the plain real candles, titled to say so.
+
+    Reuses each decision's own already-generated `price` (and, for CVAE, the specific draw
+    nearest its own take-profit target -- see make_cvae_predict_fn) rather than re-running
+    inference after the fact: CVAE's sampling is stochastic, so a fresh re-sample here
+    could disagree with the draws that actually earned this window its case label.
 
     Each figure has 3 candlestick panels: ground truth (left), PatchTST's generated
-    horizon candles (top right), CVAE's generated horizon candles (bottom right). CVAE's
-    take-profit target is a percentile across all k sampled draws' own exit prices (see
-    run_backtest), not tied to any single draw -- so rather than always rendering an
-    arbitrary draw (which could show a target line sitting outside the candles drawn
-    under it), the rendered draw is whichever of the k has its own exit price closest to
-    that target (see nearest_draw_index), keeping the illustration visually consistent
-    with the line drawn over it. Each panel gets a red box around the generated/predicted
-    3 candles, a dashed buy-price line, and a solid take-profit line per model, starting
-    at the left edge of that box and running to the panel's right edge -- the ground
-    truth panel shows both models' lines together for comparison. A line pinned outside
-    the panel's y-range is drawn just inside the edge instead, annotated with its real
-    price. The PatchTST and CVAE panels additionally report in the text table whether
-    that model's take-profit order actually filled or expired against the REAL price
-    action (see take_profit_exit) -- this verdict is always computed from real
-    ground-truth OHLC, independent of which draw is shown or whether the drawn candles
-    themselves reach the target line. Also writes samples.json alongside the PNGs -- the
-    same per-sample numbers (candles, buy/take-profit prices, outcome, spread) plus its
-    case and ctx bucket, structured for update_report.py to regenerate v1.md's Results
+    horizon candles (top right), CVAE's generated horizon candles (bottom right). Every
+    panel gets a red box around the generated/predicted 3 candles, a dashed buy-price
+    line, and a solid take-profit line per model, starting at the left edge of that box
+    and running to the panel's right edge -- the ground truth panel shows both models'
+    lines together for comparison. A line pinned outside the panel's y-range is drawn just
+    inside the edge instead, annotated with its real price. The PatchTST and CVAE panels
+    additionally report in the text table whether that model's take-profit order actually
+    filled or expired against the real price action -- computed once, during the walk
+    itself (see run_walk_forward), not recomputed here. Also writes samples.json alongside
+    the PNGs -- the same per-sample numbers (candles, buy/take-profit prices, outcome,
+    spread) plus its case, structured for update_report.py to regenerate v1.md's Results
     tables without transcribing PNGs by hand."""
     out_dir = Path(args.plots_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -685,113 +659,108 @@ def make_plots(
 
     rng = np.random.default_rng()
     ohlc_cols = ["open", "high", "low", "close"]
-    ctx_bars_arr = np.array([cb for _, cb in test_pairs])
-    ctx_bucket_arr = np.array([context_bucket(cb) for cb in ctx_bars_arr])
-
-    def spread(ohlc: np.ndarray) -> float:
-        """max - min of the 3 bars' 6 open/close values -- how wide a candle path is."""
-        return float(ohlc[:, [0, 3]].max() - ohlc[:, [0, 3]].min())
+    pt_by_start = {d["start_idx"]: d for d in pt_decisions}
 
     records = []
     plotted = 0
     for case in CASE_LABELS:
-        for ctx_bucket_name in ("narrow", "wide"):
-            candidates = np.where((cvae_label == case) & (ctx_bucket_arr == ctx_bucket_name))[0]
-            if len(candidates) == 0:
-                logger.warning(
-                    "no test-set windows found for case=%s ctx_bucket=%s -- skipping", case, ctx_bucket_name
-                )
-                continue
-            idx = int(rng.choice(candidates))
-            start_idx, ctx_bars = test_pairs[idx]
+        candidates = [d for d in cvae_decisions if d["label"] == case]
+        if not candidates:
+            logger.warning("no CVAE walk-forward decisions found for case=%s -- skipping", case)
+            continue
+        overlapping = [d for d in candidates if d["start_idx"] in pt_by_start]
+        if not overlapping:
+            logger.warning(
+                "case=%s: no CVAE candidate lines up with a PatchTST decision at the same "
+                "start_idx -- PatchTST panel will show real (uncontrolled) candles only", case,
+            )
+        pool = overlapping if overlapping else candidates
+        cvae_d = pool[int(rng.integers(len(pool)))]
+        pt_d = pt_by_start.get(cvae_d["start_idx"])
 
-            pt_ohlc = reconstruct_prices(pt_y[idx, :12].reshape(3, 4), close_0[idx])  # (3,4)
-            buy_price = float(close_0[idx])
-            pt_tp = float(pt_take_profit[idx])
-            cvae_tp = float(cvae_take_profit[idx])
-            # Render whichever draw's own exit price is closest to the target actually
-            # used (a percentile across all k draws) -- not always draw 0 -- so the
-            # candles shown are visually consistent with the line drawn over them.
-            draw_idx = nearest_draw_index(cvae_exit_prices[:, idx], cvae_tp)
-            cvae_ohlc = reconstruct_prices(cvae_y[draw_idx, idx, :12].reshape(3, 4), close_0[idx])  # (3,4)
+        start_idx, ctx_bars = cvae_d["start_idx"], WALK_FORWARD_CTX_BARS
+        buy_price = cvae_d["close_0"]
+        cvae_tp = cvae_d["take_profit"]
+        cvae_ohlc = reconstruct_prices(cvae_d["price"], buy_price)  # (3,4)
 
-            ctx_tail = min(ctx_bars, 20)
-            hz_start = start_idx + ctx_bars
-            plot_rows = df.iloc[hz_start - ctx_tail : hz_start + 3]
-            true_df = plot_rows.set_index("datetime")[["open", "high", "low", "close", "volume"]]
+        ctx_tail = min(ctx_bars, 20)
+        hz_start = start_idx + ctx_bars
+        plot_rows = df.iloc[hz_start - ctx_tail : hz_start + 3]
+        true_df = plot_rows.set_index("datetime")[["open", "high", "low", "close", "volume"]]
 
+        cvae_df = true_df.copy()
+        cvae_df.loc[cvae_df.index[-3:], ohlc_cols] = cvae_ohlc
+
+        true_horizon_ohlc = true_df.iloc[-HORIZON:][["open", "high", "low", "close"]].to_numpy()
+
+        sell_targets = [("CVAE TP", cvae_tp, "tab:green", "-")]
+        if pt_d is not None:
+            pt_tp = pt_d["take_profit"]
+            pt_ohlc = reconstruct_prices(pt_d["price"], buy_price)  # (3,4)
             pt_df = true_df.copy()
             pt_df.loc[pt_df.index[-3:], ohlc_cols] = pt_ohlc
-            cvae_df = true_df.copy()
-            cvae_df.loc[cvae_df.index[-3:], ohlc_cols] = cvae_ohlc
+            sell_targets.insert(0, ("PatchTST TP", pt_tp, "tab:orange", "-"))
+        else:
+            pt_tp = pt_ohlc = None
+            pt_df = true_df
 
-            true_horizon_ohlc = true_df.iloc[-HORIZON:][["open", "high", "low", "close"]].to_numpy()
+        fig = plt.figure(figsize=(16, 8))
+        outer = fig.add_gridspec(6, 2, width_ratios=[1, 1], hspace=0.7, wspace=0.25)
 
-            fig = plt.figure(figsize=(16, 8))
-            outer = fig.add_gridspec(6, 2, width_ratios=[1, 1], hspace=0.7, wspace=0.25)
+        render_panel(
+            fig, outer[0:4, 0], outer[4:6, 0], true_df, buy_price, "Ground truth",
+            sell_targets=sell_targets,
+        )
+        render_panel(
+            fig, outer[0:2, 1], outer[2, 1], pt_df, buy_price,
+            "PatchTST generated" if pt_d is not None else "PatchTST (not evaluated this window)",
+            sell_targets=[("PatchTST TP", pt_tp, "tab:orange", "-")] if pt_d is not None else [],
+            sell_limit=pt_tp, would_enter=(pt_d["would_trade"] if pt_d is not None else None),
+            realized=((pt_d["sell_price"], "take_profit" if pt_d["hit_take_profit"] else "expired") if pt_d is not None else None),
+        )
+        render_panel(
+            fig, outer[3:5, 1], outer[5, 1], cvae_df, buy_price, "CVAE generated (draw nearest target)",
+            sell_targets=[("CVAE TP", cvae_tp, "tab:green", "-")],
+            sell_limit=cvae_tp, would_enter=cvae_d["would_trade"],
+            realized=(cvae_d["sell_price"], "take_profit" if cvae_d["hit_take_profit"] else "expired"),
+        )
 
-            render_panel(
-                fig, outer[0:4, 0], outer[4:6, 0], true_df, buy_price, "Ground truth",
-                sell_targets=[
-                    ("PatchTST TP", pt_tp, "tab:orange", "-"),
-                    ("CVAE TP", cvae_tp, "tab:green", "-"),
-                ],
-            )
-            pt_realized, pt_would_enter = render_panel(
-                fig, outer[0:2, 1], outer[2, 1], pt_df, buy_price, "PatchTST generated",
-                sell_targets=[("PatchTST TP", pt_tp, "tab:orange", "-")],
-                true_horizon_ohlc=true_horizon_ohlc, sell_limit=pt_tp,
-            )
-            cvae_realized, cvae_would_enter = render_panel(
-                fig, outer[3:5, 1], outer[5, 1], cvae_df, buy_price, "CVAE generated (draw nearest target)",
-                sell_targets=[("CVAE TP", cvae_tp, "tab:green", "-")],
-                true_horizon_ohlc=true_horizon_ohlc, sell_limit=cvae_tp,
-            )
+        fig.suptitle(f"CVAE case: {CASE_TITLES[case]}  |  ctx_bars={ctx_bars}, start_idx={start_idx}")
+        out_path = out_dir / f"{case}_start{start_idx}_ctx{ctx_bars}.png"
+        fig.savefig(out_path, bbox_inches="tight")
+        plt.close(fig)
+        plotted += 1
 
-            fig.suptitle(
-                f"CVAE case: {CASE_TITLES[case]}  |  {ctx_bucket_name} ctx "
-                f"(ctx_bars={ctx_bars}, start_idx={start_idx})"
-            )
-            out_path = out_dir / f"{case}_{ctx_bucket_name}_start{start_idx}_ctx{ctx_bars}.png"
-            fig.savefig(out_path, bbox_inches="tight")
-            plt.close(fig)
-            plotted += 1
+        def model_record(d, ohlc, tp):
+            if d is None:
+                return {
+                    "candles": true_horizon_ohlc.tolist(), "spread": spread(true_horizon_ohlc),
+                    "sell_limit": None, "would_enter": False, "outcome": None,
+                    "realized_price": None, "realized_return_pct": None,
+                }
+            outcome = "take_profit" if d["hit_take_profit"] else "expired"
+            return {
+                "candles": ohlc.tolist(),
+                "spread": spread(ohlc),
+                "sell_limit": tp,
+                "would_enter": d["would_trade"],
+                "outcome": outcome if d["would_trade"] else None,
+                "realized_price": d["sell_price"] if d["would_trade"] else None,
+                "realized_return_pct": (
+                    (d["sell_price"] / buy_price - 1.0) * 100 if d["would_trade"] else None
+                ),
+            }
 
-            # realized is None whenever would_enter is False -- no order was ever placed,
-            # so there's nothing to report as realized (see trade_table_text).
-            pt_realized_price, pt_outcome = pt_realized if pt_realized is not None else (None, None)
-            cvae_realized_price, cvae_outcome = cvae_realized if cvae_realized is not None else (None, None)
-            records.append({
-                "case": case,
-                "ctx_bucket": ctx_bucket_name,
-                "file": out_path.name,
-                "ctx_bars": ctx_bars,
-                "start_idx": start_idx,
-                "buy_price": buy_price,
-                "ground_truth": {"candles": true_horizon_ohlc.tolist(), "spread": spread(true_horizon_ohlc)},
-                "patchtst": {
-                    "candles": pt_ohlc.tolist(),
-                    "spread": spread(pt_ohlc),
-                    "sell_limit": pt_tp,
-                    "would_enter": pt_would_enter,
-                    "outcome": pt_outcome,
-                    "realized_price": pt_realized_price,
-                    "realized_return_pct": (
-                        (pt_realized_price / buy_price - 1.0) * 100 if pt_realized_price is not None else None
-                    ),
-                },
-                "cvae": {
-                    "candles": cvae_ohlc.tolist(),
-                    "spread": spread(cvae_ohlc),
-                    "sell_limit": cvae_tp,
-                    "would_enter": cvae_would_enter,
-                    "outcome": cvae_outcome,
-                    "realized_price": cvae_realized_price,
-                    "realized_return_pct": (
-                        (cvae_realized_price / buy_price - 1.0) * 100 if cvae_realized_price is not None else None
-                    ),
-                },
-            })
+        records.append({
+            "case": case,
+            "file": out_path.name,
+            "ctx_bars": ctx_bars,
+            "start_idx": start_idx,
+            "buy_price": buy_price,
+            "ground_truth": {"candles": true_horizon_ohlc.tolist(), "spread": spread(true_horizon_ohlc)},
+            "patchtst": model_record(pt_d, pt_ohlc, pt_tp),
+            "cvae": model_record(cvae_d, cvae_ohlc, cvae_tp),
+        })
     logger.info("wrote %d sample plots to %s", plotted, out_dir)
 
     samples_path = out_dir / "samples.json"
@@ -806,8 +775,8 @@ def main() -> None:
     logger.info("device: %s", device)
 
     # CVAE.sample()'s reparameterize() draws from torch's global RNG (torch.randn_like) --
-    # without seeding it, CVAE's backtest/metrics numbers drift between runs on the exact
-    # same fixed test set, even though the window sampling below is already seeded.
+    # without seeding it, CVAE's walk-forward numbers drift between runs on unchanged
+    # checkpoints.
     torch.manual_seed(args.seed)
 
     pt_ckpt = torch.load(args.patchtst_checkpoint, map_location=device, weights_only=False)
@@ -826,21 +795,6 @@ def main() -> None:
         args.sell_bound_percentile, sell_bound,
     )
 
-    test_sampler = WindowSampler(*bounds["test"])
-    rng = np.random.default_rng(args.seed)
-    test_pairs = test_sampler.draw(args.n_test_windows, rng)
-    logger.info("evaluating on %d fixed test windows", len(test_pairs))
-
-    test_ds = WindowDataset(feat, opens, closes, test_pairs)
-    test_loader = DataLoader(
-        test_ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        collate_fn=collate,
-        num_workers=args.num_workers,
-        pin_memory=device.type == "cuda",
-    )
-
     patchtst = PatchTST(**pt_cfg["model"]).to(device)
     patchtst.load_state_dict(pt_ckpt["model_state"])
     patchtst.eval()
@@ -849,49 +803,45 @@ def main() -> None:
     cvae.load_state_dict(cvae_ckpt["model_state"])
     cvae.eval()
 
-    true_y, pt_y, cvae_y, close_0, ctx_bars = collect_predictions(
-        patchtst, cvae, test_loader, device, args.num_samples
+    test_lo, test_hi = bounds["test"]
+    wf_entry_idx = test_lo + WALK_FORWARD_CTX_BARS - 1  # first decision point's close_0 bar
+
+    logger.info(
+        "running walk-forward backtest (ctx=%d bars, confidence>=%.2f, min_return>=%.3f%%, %d..%d)...",
+        WALK_FORWARD_CTX_BARS, args.confidence_threshold, args.min_return_threshold * 100, test_lo, test_hi,
+    )
+    pt_predict = make_patchtst_predict_fn(patchtst, device, sell_bound)
+    cvae_predict = make_cvae_predict_fn(cvae, device, sell_bound, args.num_samples, args.cvae_sell_quantile)
+    pt_wf = run_walk_forward(
+        pt_predict, feat, opens, closes, test_lo, test_hi, args.confidence_threshold, args.min_return_threshold
+    )
+    cvae_wf = run_walk_forward(
+        cvae_predict, feat, opens, closes, test_lo, test_hi, args.confidence_threshold, args.min_return_threshold
+    )
+    logger.info(
+        "walk-forward: PatchTST %d trades / %d decisions, CVAE %d trades / %d decisions",
+        len(pt_wf["trades"]), len(pt_wf["decisions"]), len(cvae_wf["trades"]), len(cvae_wf["decisions"]),
     )
 
-    n, k = len(pt_y), cvae_y.shape[0]
-    pt_y[:, :12] = shrink_components(pt_y[:, :12].reshape(n, 3, 4), sell_bound).reshape(n, 12)
-    cvae_y[..., :12] = shrink_components(cvae_y[..., :12].reshape(k, n, 3, 4), sell_bound).reshape(k, n, 12)
-
-    # Computed once here (not just inside run_backtest) so make_plots can select
-    # illustrative windows using the exact same take-profit targets and case labels the
-    # backtest reports, instead of re-deriving them from a freshly re-sampled CVAE draw.
-    pt_price = pt_y[:, :12].reshape(n, 3, 4)
-    cvae_price_samples = cvae_y[..., :12].reshape(k, n, 3, 4)
-    true_ohlc_full = reconstruct_prices(true_y[:, :12].reshape(n, 3, 4), close_0)
-    pt_take_profit = max_close_from_components(pt_price, close_0)
-    cvae_exit_prices = exit_price_from_components(cvae_price_samples, close_0)
-    cvae_take_profit = np.percentile(cvae_exit_prices, args.cvae_sell_quantile, axis=0)
-    cvae_outcomes = model_trade_outcomes(true_ohlc_full, cvae_take_profit, close_0)
-
-    results = {"overall": metrics_for_slice(true_y, pt_y, cvae_y, close_0, stats)}
-    results["overall"]["backtest"] = run_backtest(true_y, pt_y, cvae_y, close_0, args.cvae_sell_quantile)
-    results["overall"]["backtest"]["buy_and_hold"] = buy_and_hold_benchmark(df, bounds)
-
-    buckets = np.array([context_bucket(c) for c in ctx_bars])
-    for bucket in BUCKETS:
-        mask = buckets == bucket
-        results[bucket] = metrics_for_slice(
-            true_y[mask], pt_y[mask], cvae_y[:, mask], close_0[mask], stats
-        )
-        results[bucket]["backtest"] = run_backtest(
-            true_y[mask], pt_y[mask], cvae_y[:, mask], close_0[mask], args.cvae_sell_quantile
-        )
+    results = {
+        "walk_forward": {
+            "ctx_bars": WALK_FORWARD_CTX_BARS,
+            "confidence_threshold": args.confidence_threshold,
+            "min_return_threshold": args.min_return_threshold,
+            "buy_and_hold": buy_and_hold_benchmark(df, wf_entry_idx, test_hi - 1),
+            "naive_periodic": naive_periodic_benchmark(df, closes, wf_entry_idx, test_hi),
+            "patchtst": walk_forward_stats(df, pt_wf),
+            "cvae": walk_forward_stats(df, cvae_wf),
+        }
+    }
 
     Path(args.metrics_out).parent.mkdir(parents=True, exist_ok=True)
     with open(args.metrics_out, "w") as f:
         json.dump(results, f, indent=2)
     logger.info("wrote metrics to %s", args.metrics_out)
-    logger.info("overall: %s", json.dumps(results["overall"], indent=2))
+    logger.info("walk_forward: %s", json.dumps(results["walk_forward"], indent=2))
 
-    make_plots(
-        df, test_pairs, pt_y, cvae_y, close_0, pt_take_profit, cvae_take_profit,
-        cvae_exit_prices, cvae_outcomes["label"], args,
-    )
+    make_plots(df, pt_wf["decisions"], cvae_wf["decisions"], args)
 
 
 if __name__ == "__main__":

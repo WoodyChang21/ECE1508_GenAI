@@ -1,12 +1,12 @@
 """Regenerate the data-driven tables/images in v1.md from the latest evaluate.py run.
 
 Reads steven/outputs/metrics.json + steven/outputs/sample_plots/samples.json (both written
-by evaluate.py) and replaces 6 marker-delimited regions in v1.md -- the Results section's
-per-sample subsections plus its two summary tables, the population-level outcome-breakdown
-table, and the Long-only backtest results' two threshold tables. Everything else in v1.md
-(prose, headings, caveats) is left untouched. Run this after every evaluate.py run so the
-doc's tables/images always match the latest checkpoints instead of a stale hand-transcribed
-run.
+by evaluate.py) and replaces the marker-delimited regions in v1.md -- the Results
+section's per-sample subsections plus its two summary tables, and the walk-forward
+backtest's strategy-comparison, outcome-breakdown, and buy-and-hold tables. Everything
+else in v1.md (prose, headings, caveats) is left untouched. Run this after every
+evaluate.py run so the doc's tables/images always match the latest checkpoints instead of
+a stale hand-transcribed run.
 
 Usage:
     python steven/src/update_report.py
@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 MANUAL_REVIEW_REMINDER = (
     "not auto-updated -- reread and edit by hand if the story changed: the 'In plain "
     "terms' / 'A subtle but important point' interpretation paragraphs under Results, "
-    "the 'pre-retrain checkpoints' caveats in Results and Long-only backtest results, "
-    "and the 'Retrain both models' checkbox under Next steps."
+    "the 'pre-retrain checkpoints' caveat in Results, and the 'Retrain both models' "
+    "checkbox under Next steps."
 )
 
 
@@ -63,17 +63,24 @@ def candle_oc(candle: list[float]) -> str:
     return f"{candle[0]:.2f} / {candle[3]:.2f}"
 
 
+def fmt_price_or_dash(price: float | None) -> str:
+    """sell_limit is None when this model was never evaluated at this exact window (its
+    walk-forward had already diverged from CVAE's -- see evaluate.py's make_plots)."""
+    return f"{price:.2f}" if price is not None else "—"
+
+
 OUTCOME_LABEL = {"take_profit": "TAKE PROFIT", "expired": "EXPIRED"}
 
 # Mirrors src/evaluate.py's CASE_LABELS/CASE_TITLES -- kept as a local literal rather than
 # importing evaluate.py, since this script only ever reads the JSON it already wrote and
 # has no other dependency on torch/models.
-CASE_LABELS = ["win_take_profit", "win_expiry", "no_trade", "lose_expiry"]
+CASE_LABELS = ["win_take_profit", "win_expiry", "lose_expiry", "skipped", "no_trade"]
 CASE_TITLES = {
     "win_take_profit": "Win — take-profit hit",
     "win_expiry": "Win — expiry (gain)",
-    "no_trade": "No trade (target <= buy)",
     "lose_expiry": "Lose — expiry (loss)",
+    "skipped": "Skipped (low confidence or return too small)",
+    "no_trade": "No trade (target <= buy)",
 }
 
 
@@ -86,6 +93,12 @@ def vs_real_cell(model: dict) -> str:
 
 
 def trade_decision_cell(model: dict) -> str:
+    """sell_limit is None specifically when this model's walk-forward never evaluated this
+    exact window at all (its own clock had already diverged from CVAE's -- see
+    evaluate.py's make_plots) -- distinct from an actual NO TRADE/SKIPPED decision, which
+    the model did make, just chose not to act on."""
+    if model["sell_limit"] is None:
+        return "*(not evaluated)*"
     return "**ENTER**" if model["would_enter"] else "**NO TRADE**"
 
 
@@ -102,10 +115,9 @@ def sample_section(s: dict) -> str:
     gt, pt, cvae = s["ground_truth"], s["patchtst"], s["cvae"]
     buy = s["buy_price"]
     return "\n".join([
-        f"### {CASE_TITLES[s['case']]} — {s['ctx_bucket']} context (`ctx_bars={s['ctx_bars']}`, "
-        f"`start_idx={s['start_idx']}`)",
+        f"### {CASE_TITLES[s['case']]} (`ctx_bars={s['ctx_bars']}`, `start_idx={s['start_idx']}`)",
         "",
-        f"![{s['case']}_{s['ctx_bucket']}](outputs/sample_plots/{s['file']})",
+        f"![{s['case']}](outputs/sample_plots/{s['file']})",
         "",
         "| | Candle 1 (open / close) | Candle 2 (open / close) | Candle 3 (open / close) | "
         "Buy price | Take-profit | Trade? | vs. real price |",
@@ -114,10 +126,10 @@ def sample_section(s: dict) -> str:
         f"{candle_oc(gt['candles'][2])} | {buy:.2f} | — | — | "
         f"{ground_truth_vs_real_cell(gt, buy)} |",
         f"| PatchTST | {candle_oc(pt['candles'][0])} | {candle_oc(pt['candles'][1])} | "
-        f"{candle_oc(pt['candles'][2])} | {buy:.2f} | {pt['sell_limit']:.2f} | "
+        f"{candle_oc(pt['candles'][2])} | {buy:.2f} | {fmt_price_or_dash(pt['sell_limit'])} | "
         f"{trade_decision_cell(pt)} | {vs_real_cell(pt)} |",
         f"| CVAE | {candle_oc(cvae['candles'][0])} | {candle_oc(cvae['candles'][1])} | "
-        f"{candle_oc(cvae['candles'][2])} | {buy:.2f} | {cvae['sell_limit']:.2f} | "
+        f"{candle_oc(cvae['candles'][2])} | {buy:.2f} | {fmt_price_or_dash(cvae['sell_limit'])} | "
         f"{trade_decision_cell(cvae)} | {vs_real_cell(cvae)} |",
     ])
 
@@ -129,27 +141,27 @@ def results_samples_block(samples: list[dict]) -> str:
 def hit_status(model: dict) -> str:
     """NO TRADE takes priority over the outcome -- a model whose own target sits below
     buy never has a take-profit order placed in the first place, so how it would have
-    resolved is moot."""
+    resolved is moot. NOT EVALUATED is distinct: this model's walk never visited this
+    exact window at all (see trade_decision_cell)."""
+    if model["sell_limit"] is None:
+        return "NOT EVALUATED"
     if not model["would_enter"]:
         return "NO TRADE"
     return OUTCOME_LABEL[model["outcome"]]
 
 
 def hit_summary_block(samples: list[dict]) -> str:
-    lines = ["| Case | Context | PatchTST | CVAE |", "|---|---|---|---|"]
+    lines = ["| Case | PatchTST | CVAE |", "|---|---|---|"]
     for s in samples:
-        lines.append(
-            f"| {CASE_TITLES[s['case']]} | {s['ctx_bucket']} | "
-            f"{hit_status(s['patchtst'])} | {hit_status(s['cvae'])} |"
-        )
+        lines.append(f"| {CASE_TITLES[s['case']]} | {hit_status(s['patchtst'])} | {hit_status(s['cvae'])} |")
     return "\n".join(lines)
 
 
 def spread_summary_block(samples: list[dict]) -> str:
-    lines = ["| Case | Context | Ground truth (actual) | PatchTST | CVAE |", "|---|---|---|---|---|"]
+    lines = ["| Case | Ground truth (actual) | PatchTST | CVAE |", "|---|---|---|---|"]
     for s in samples:
         lines.append(
-            f"| {CASE_TITLES[s['case']]} | {s['ctx_bucket']} | {s['ground_truth']['spread']:.2f} | "
+            f"| {CASE_TITLES[s['case']]} | {s['ground_truth']['spread']:.2f} | "
             f"{s['patchtst']['spread']:.2f} | {s['cvae']['spread']:.2f} |"
         )
     return "\n".join(lines)
@@ -167,16 +179,6 @@ def outcome_breakdown_table(pt_breakdown: dict, cvae_breakdown: dict) -> str:
     return "\n".join(lines)
 
 
-def backtest_row(row: dict) -> str:
-    if row["win_rate"] is None:
-        return f"| {row['threshold']} | {row['n_trades']} | — | — | — | — |"
-    return (
-        f"| {row['threshold']} | {row['n_trades']} | {fmt_plain_pct(row['win_rate'], 1)} | "
-        f"{fmt_plain_pct(row['take_profit_rate'], 1)} | "
-        f"{fmt_signed_pct_fraction(row['avg_return'], 3)} | {fmt_signed_pct_fraction(row['total_return'], 2)} |"
-    )
-
-
 def buy_hold_block(bh: dict) -> str:
     lines = [
         "| Entry (date / price) | Exit (date / price) | Elapsed | Total return | Annualized return |",
@@ -188,13 +190,33 @@ def buy_hold_block(bh: dict) -> str:
     return "\n".join(lines)
 
 
-def backtest_table(rows: list[dict]) -> str:
-    header = (
-        "| Confidence threshold | Trades taken | Win rate | Take-profit rate | "
-        "Avg. return per trade | Total return |"
+def walk_forward_row(name: str, row: dict) -> str:
+    if not row.get("n_trades") or row.get("win_rate") is None:
+        return f"| {name} | {row.get('n_trades', 0)} | — | — | — | — | — |"
+    tp_rate = row.get("take_profit_rate")
+    tp_cell = fmt_plain_pct(tp_rate, 1) if tp_rate is not None else "—"
+    return (
+        f"| {name} | {row['n_trades']} | {fmt_plain_pct(row['win_rate'], 1)} | {tp_cell} | "
+        f"{fmt_signed_pct_fraction(row['avg_return'], 3)} | "
+        f"{fmt_signed_pct_fraction(row['total_return'], 2)} | "
+        f"{fmt_signed_pct_fraction(row['annual_return'], 2)} |"
     )
-    sep = "|---|---|---|---|---|---|"
-    return "\n".join([header, sep] + [backtest_row(r) for r in rows])
+
+
+def walk_forward_table(naive: dict, patchtst: dict, cvae: dict) -> str:
+    """Naive periodic has no take-profit order at all (see evaluate.py's
+    naive_periodic_benchmark) -- its take_profit_rate is always None, rendered as '—'."""
+    header = (
+        "| Strategy | Trades | Win rate | Take-profit rate | Avg. return per trade | "
+        "Total return | Annualized return |"
+    )
+    sep = "|---|---|---|---|---|---|---|"
+    rows = [
+        walk_forward_row("Naive periodic (3-bar cycle, no signal)", naive),
+        walk_forward_row("PatchTST walk-forward", patchtst),
+        walk_forward_row("CVAE walk-forward", cvae),
+    ]
+    return "\n".join([header, sep] + rows)
 
 
 def replace_block(doc_text: str, name: str, content: str) -> str:
@@ -213,17 +235,16 @@ def main() -> None:
     metrics = json.loads(Path(args.metrics).read_text())
     samples = json.loads(Path(args.samples_json).read_text())
 
+    wf = metrics["walk_forward"]
     blocks = {
         "results-samples": results_samples_block(samples),
         "hit-summary": hit_summary_block(samples),
         "spread-summary": spread_summary_block(samples),
-        "outcome-breakdown": outcome_breakdown_table(
-            metrics["overall"]["backtest"]["patchtst_outcome_breakdown"],
-            metrics["overall"]["backtest"]["cvae_outcome_breakdown"],
+        "buy-hold-benchmark": buy_hold_block(wf["buy_and_hold"]),
+        "walk-forward-strategies": walk_forward_table(wf["naive_periodic"], wf["patchtst"], wf["cvae"]),
+        "walk-forward-outcome-breakdown": outcome_breakdown_table(
+            wf["patchtst"]["outcome_breakdown"], wf["cvae"]["outcome_breakdown"]
         ),
-        "backtest-patchtst": backtest_table(metrics["overall"]["backtest"]["patchtst"]),
-        "backtest-cvae": backtest_table(metrics["overall"]["backtest"]["cvae"]),
-        "buy-hold-benchmark": buy_hold_block(metrics["overall"]["backtest"]["buy_and_hold"]),
     }
 
     doc_path = Path(args.doc)
