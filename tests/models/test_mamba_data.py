@@ -37,3 +37,27 @@ def test_history_rows_are_context_not_labels():
     _, first_target = dataset[0]
     assert len(dataset) == len(current)
     assert first_target.item() == current[0, 0]
+
+
+def test_window_dataset_returns_complete_multi_step_targets():
+    values = np.arange(16, dtype=np.float32).reshape(8, 2)
+    dataset = WindowDataset(
+        values, lookback=2, target_index=0, forecast_horizon=3
+    )
+
+    window, target = dataset[0]
+
+    np.testing.assert_array_equal(window.numpy(), values[:2])
+    np.testing.assert_array_equal(target.numpy(), values[2:5, 0])
+    assert len(dataset) == 4
+
+
+def test_history_multi_step_targets_stay_inside_current_split():
+    history = np.arange(12, dtype=np.float32).reshape(6, 2)
+    current = np.arange(100, 110, dtype=np.float32).reshape(5, 2)
+    dataset = with_history(history, current, lookback=3, forecast_horizon=3)
+
+    _, first_target = dataset[0]
+
+    np.testing.assert_array_equal(first_target.numpy(), current[:3, 0])
+    assert len(dataset) == 3

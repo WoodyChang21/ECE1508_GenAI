@@ -67,7 +67,7 @@ def resolve_device(requested: str) -> torch.device:
     return device
 
 
-def make_model(options: ModelOptions) -> MambaForecaster:
+def make_model(options: ModelOptions, forecast_horizon: int = 1) -> MambaForecaster:
     return MambaForecaster(
         n_features=len(FEATURE_COLUMNS),
         d_model=options.d_model,
@@ -76,6 +76,7 @@ def make_model(options: ModelOptions) -> MambaForecaster:
         expand=options.expand,
         conv_kernel=options.conv_kernel,
         dropout=options.dropout,
+        output_size=forecast_horizon,
     )
 
 
@@ -179,11 +180,19 @@ def loaders_for_tuning(
     scaler: ZScoreScaler,
     lookback: int,
     batch_size: int,
+    forecast_horizon: int = 1,
 ) -> tuple[DataLoader, DataLoader]:
     train_scaled = scaler.transform(train_values)
     val_scaled = scaler.transform(val_values)
-    train_set = WindowDataset(train_scaled, lookback=lookback)
-    val_set = with_history(train_scaled, val_scaled, lookback=lookback)
+    train_set = WindowDataset(
+        train_scaled, lookback=lookback, forecast_horizon=forecast_horizon
+    )
+    val_set = with_history(
+        train_scaled,
+        val_scaled,
+        lookback=lookback,
+        forecast_horizon=forecast_horizon,
+    )
     if len(train_set) == 0:
         raise ValueError(f"lookback {lookback} leaves no training windows")
     return (
@@ -204,6 +213,16 @@ def residual_intervals(
     }
 
 
+def compound_horizon(returns: np.ndarray) -> np.ndarray:
+    """Compound per-step simple returns into one return per forecast window."""
+    values = np.asarray(returns)
+    if values.ndim == 1:
+        return values
+    if values.ndim != 2:
+        raise ValueError("returns must be a 1D or 2D array")
+    return np.prod(1.0 + values, axis=1, dtype=np.float64) - 1.0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--train", default="data/splits/train.parquet")
@@ -211,7 +230,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test", default="data/splits/test.parquet")
     parser.add_argument("--output", default="data/predictions/mamba_preds.parquet")
     parser.add_argument("--checkpoint", default=None)
-    parser.add_argument("--lookbacks", nargs="+", type=int, default=[24, 60, 120, 240])
+    parser.add_argument("--lookbacks", nargs="+", type=int, default=[24, 60, 120])
+    parser.add_argument(
+        "--forecast-horizon",
+        type=int,
+        default=3,
+        help="Number of future hourly returns predicted together (default: 3).",
+    )
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -237,6 +262,8 @@ def main() -> None:
         raise ValueError("epochs and batch size must be positive")
     if any(lookback < 1 for lookback in args.lookbacks):
         raise ValueError("lookbacks must be positive")
+    if args.forecast_horizon < 1:
+        raise ValueError("forecast-horizon must be positive")
 
     seed_everything(args.seed)
     device = resolve_device(args.device)
@@ -279,9 +306,10 @@ def main() -> None:
             tuning_scaler,
             lookback,
             args.batch_size,
+            args.forecast_horizon,
         )
         model, best_epoch, score = train_model(
-            make_model(options),
+            make_model(options, args.forecast_horizon),
             train_loader,
             device,
             args.epochs,
@@ -292,15 +320,24 @@ def main() -> None:
         )
         assert score is not None
         pred_norm, true_norm = predict(model, val_loader, device)
-        val_pred = tuning_scaler.inverse_target(pred_norm)
-        val_true = tuning_scaler.inverse_target(true_norm)
-        result = {"lookback": lookback, "best_epoch": best_epoch, "val_mae": score}
+        val_pred_steps = tuning_scaler.inverse_target(pred_norm)
+        val_true_steps = tuning_scaler.inverse_target(true_norm)
+        val_pred = compound_horizon(val_pred_steps)
+        val_true = compound_horizon(val_true_steps)
+        cumulative_val_mae = float(np.mean(np.abs(val_pred - val_true)))
+        result = {
+            "lookback": lookback,
+            "best_epoch": best_epoch,
+            "normalized_per_step_val_mae": score,
+            "cumulative_horizon_val_mae": cumulative_val_mae,
+        }
         tuning_results.append(result)
-        if best is None or score < best["score"]:
+        if best is None or cumulative_val_mae < best["selection_score"]:
             best = {
                 "lookback": lookback,
                 "epoch": best_epoch,
-                "score": score,
+                "selection_score": cumulative_val_mae,
+                "normalized_per_step_score": score,
                 "val_pred": val_pred,
                 "val_true": val_true,
             }
@@ -310,19 +347,24 @@ def main() -> None:
     final_epochs = int(best["epoch"])
     print(
         f"\nSelected lookback={best_lookback}, epochs={final_epochs}, "
-        f"normalized_val_mae={best['score']:.6f}"
+        f"cumulative_horizon_val_mae={best['selection_score']:.6f}, "
+        f"normalized_per_step_val_mae={best['normalized_per_step_score']:.6f}"
     )
 
     trainval_values = np.concatenate([train_values, val_values], axis=0)
     final_scaler = ZScoreScaler.fit(trainval_values)
     trainval_scaled = final_scaler.transform(trainval_values)
-    final_train_set = WindowDataset(trainval_scaled, lookback=best_lookback)
+    final_train_set = WindowDataset(
+        trainval_scaled,
+        lookback=best_lookback,
+        forecast_horizon=args.forecast_horizon,
+    )
     final_loader = DataLoader(
         final_train_set, batch_size=args.batch_size, shuffle=True
     )
     seed_everything(args.seed)
     final_model, _, _ = train_model(
-        make_model(options),
+        make_model(options, args.forecast_horizon),
         final_loader,
         device,
         final_epochs,
@@ -331,11 +373,18 @@ def main() -> None:
     )
 
     test_scaled = final_scaler.transform(test_values)
-    test_set = with_history(trainval_scaled, test_scaled, lookback=best_lookback)
+    test_set = with_history(
+        trainval_scaled,
+        test_scaled,
+        lookback=best_lookback,
+        forecast_horizon=args.forecast_horizon,
+    )
     test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False)
     pred_norm, true_norm = predict(final_model, test_loader, device)
-    test_pred = final_scaler.inverse_target(pred_norm)
-    test_true = final_scaler.inverse_target(true_norm)
+    test_pred_steps = final_scaler.inverse_target(pred_norm)
+    test_true_steps = final_scaler.inverse_target(true_norm)
+    test_pred = compound_horizon(test_pred_steps)
+    test_true = compound_horizon(test_true_steps)
 
     offsets = residual_intervals(best["val_true"], best["val_pred"])
     lo_80 = test_pred + offsets["lo_80"]
@@ -344,19 +393,35 @@ def main() -> None:
     hi_90 = test_pred + offsets["hi_90"]
     metrics = compute_all(test_true, test_pred, lo_80, hi_80, lo_90, hi_90)
 
-    output = pd.DataFrame(
-        {
-            "ds": np.arange(len(test_frame)),
-            "datetime": test_frame["datetime"].to_numpy(),
-            "y": test_true,
-            "pred": test_pred,
-            "lo_80": lo_80,
-            "hi_80": hi_80,
-            "lo_90": lo_90,
-            "hi_90": hi_90,
-            "model": "Mamba",
-        }
-    )
+    n_predictions = len(test_pred)
+    output_data: dict[str, object] = {
+        "ds": np.arange(n_predictions),
+        "datetime": test_frame["datetime"].iloc[:n_predictions].to_numpy(),
+        "horizon_end_datetime": (
+            test_frame["datetime"]
+            .iloc[
+                args.forecast_horizon
+                - 1 : args.forecast_horizon
+                - 1
+                + n_predictions
+            ]
+            .to_numpy()
+        ),
+        "y": test_true,
+        "pred": test_pred,
+        "lo_80": lo_80,
+        "hi_80": hi_80,
+        "lo_90": lo_90,
+        "hi_90": hi_90,
+        "model": "Mamba",
+    }
+    if args.forecast_horizon == 1:
+        test_true_steps = np.asarray(test_true_steps).reshape(-1, 1)
+        test_pred_steps = np.asarray(test_pred_steps).reshape(-1, 1)
+    for step in range(args.forecast_horizon):
+        output_data[f"y_h{step + 1}"] = test_true_steps[:, step]
+        output_data[f"pred_h{step + 1}"] = test_pred_steps[:, step]
+    output = pd.DataFrame(output_data)
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output.to_parquet(output_path, index=False)
@@ -369,6 +434,7 @@ def main() -> None:
                 "state_dict": final_model.cpu().state_dict(),
                 "model_options": asdict(options),
                 "lookback": best_lookback,
+                "forecast_horizon": args.forecast_horizon,
                 "feature_columns": FEATURE_COLUMNS,
                 "scaler_mean": final_scaler.mean,
                 "scaler_scale": final_scaler.scale,

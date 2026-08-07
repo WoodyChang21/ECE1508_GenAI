@@ -8,7 +8,7 @@ from transformers import MambaConfig, MambaModel
 
 
 class MambaForecaster(nn.Module):
-    """Predict the next target value from a window of continuous features.
+    """Predict one or more future target values from continuous features.
 
     Hugging Face's bare Mamba model normally receives token embeddings. Here a
     learned linear layer embeds each multivariate market observation instead.
@@ -24,14 +24,18 @@ class MambaForecaster(nn.Module):
         expand: int = 2,
         conv_kernel: int = 4,
         dropout: float = 0.1,
+        output_size: int = 1,
     ) -> None:
         super().__init__()
         if n_features < 1:
             raise ValueError("n_features must be positive")
         if not 0.0 <= dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
+        if output_size < 1:
+            raise ValueError("output_size must be positive")
 
         self.n_features = n_features
+        self.output_size = output_size
         self.input_projection = nn.Linear(n_features, d_model)
         self.input_norm = nn.LayerNorm(d_model)
         self.backbone = MambaModel(
@@ -48,10 +52,10 @@ class MambaForecaster(nn.Module):
             )
         )
         self.dropout = nn.Dropout(dropout)
-        self.head = nn.Linear(d_model, 1)
+        self.head = nn.Linear(d_model, output_size)
 
     def forward(self, values: torch.Tensor) -> torch.Tensor:
-        """Return one prediction per window.
+        """Return one scalar or multi-step forecast per window.
 
         Args:
             values: Float tensor shaped ``(batch, sequence, features)``.
@@ -69,4 +73,5 @@ class MambaForecaster(nn.Module):
             use_cache=False,
             return_dict=True,
         ).last_hidden_state
-        return self.head(self.dropout(hidden[:, -1])).squeeze(-1)
+        output = self.head(self.dropout(hidden[:, -1]))
+        return output.squeeze(-1) if self.output_size == 1 else output

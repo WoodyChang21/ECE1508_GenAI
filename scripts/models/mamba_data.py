@@ -78,30 +78,38 @@ class WindowDataset(Dataset):
         lookback: int,
         target_start: int | None = None,
         target_index: int = TARGET_INDEX,
+        forecast_horizon: int = 1,
     ) -> None:
         values = np.asarray(values, dtype=np.float32)
         if values.ndim != 2:
             raise ValueError("values must have shape (time, features)")
         if lookback < 1:
             raise ValueError("lookback must be positive")
+        if forecast_horizon < 1:
+            raise ValueError("forecast_horizon must be positive")
         if not 0 <= target_index < values.shape[1]:
             raise ValueError("target_index is out of bounds")
 
         self.values = torch.from_numpy(values)
         self.lookback = lookback
         self.target_index = target_index
+        self.forecast_horizon = forecast_horizon
         requested_start = lookback if target_start is None else target_start
         self.first_target = max(lookback, requested_start)
 
     def __len__(self) -> int:
-        return max(0, len(self.values) - self.first_target)
+        return max(0, len(self.values) - self.first_target - self.forecast_horizon + 1)
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         if index < 0 or index >= len(self):
             raise IndexError(index)
         target_pos = self.first_target + index
         window = self.values[target_pos - self.lookback : target_pos]
-        target = self.values[target_pos, self.target_index]
+        target = self.values[
+            target_pos : target_pos + self.forecast_horizon, self.target_index
+        ]
+        if self.forecast_horizon == 1:
+            target = target.squeeze(0)
         return window, target
 
 
@@ -118,11 +126,19 @@ def load_split(path: str | Path) -> tuple[pd.DataFrame, np.ndarray]:
 
 
 def with_history(
-    history: np.ndarray, current: np.ndarray, lookback: int
+    history: np.ndarray,
+    current: np.ndarray,
+    lookback: int,
+    forecast_horizon: int = 1,
 ) -> WindowDataset:
     """Create a dataset where history is context and current rows are labels."""
     if len(history) < lookback:
         raise ValueError("history is shorter than the requested lookback")
     context = history[-lookback:]
     combined = np.concatenate([context, current], axis=0)
-    return WindowDataset(combined, lookback=lookback, target_start=len(context))
+    return WindowDataset(
+        combined,
+        lookback=lookback,
+        target_start=len(context),
+        forecast_horizon=forecast_horizon,
+    )

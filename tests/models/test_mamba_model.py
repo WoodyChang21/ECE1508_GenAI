@@ -28,3 +28,20 @@ def test_mamba_forecaster_rejects_wrong_feature_count():
 
     with pytest.raises(ValueError, match="expected 3 features"):
         model(torch.randn(2, 4, 2))
+
+
+def test_mamba_forecaster_multi_horizon_output_shape():
+    model = MambaForecaster(
+        n_features=3,
+        d_model=8,
+        state_size=4,
+        num_layers=1,
+        expand=1,
+        conv_kernel=2,
+        dropout=0.0,
+        output_size=3,
+    )
+
+    predictions = model(torch.randn(2, 5, 3))
+
+    assert predictions.shape == (2, 3)

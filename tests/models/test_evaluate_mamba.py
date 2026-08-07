@@ -3,7 +3,9 @@ import pytest
 
 from scripts.models.evaluate_mamba import (
     build_report,
+    horizon_arrays,
     load_prediction_frame,
+    multi_period_strategy_metrics,
     point_metrics,
     strategy_metrics,
     validate_checkpoint,
@@ -165,3 +167,104 @@ def test_load_prediction_frame_validates_schema(tmp_path):
 
     with pytest.raises(ValueError, match="missing columns"):
         load_prediction_frame(path)
+
+
+def test_multi_period_strategy_never_overlaps_trades_and_charges_round_trips():
+    actual_timeline = np.array([0.01, 0.01, 0.01, -0.01, -0.01, -0.01])
+    actual = np.lib.stride_tricks.sliding_window_view(actual_timeline, 3)
+    predicted = np.full_like(actual, 0.01)
+
+    result = multi_period_strategy_metrics(
+        actual,
+        predicted,
+        threshold_bps=0.0,
+        transaction_cost_bps=1.0,
+        periods_per_year=1764,
+        position_mode="long_only",
+    )
+
+    assert result["trades"] == 2
+    assert result["active_periods"] == 6
+    assert result["position_turnover"] == 4.0
+    expected = np.array(
+        [
+            0.01 - 0.0001,
+            0.01,
+            0.01 - 0.0001,
+            -0.01 - 0.0001,
+            -0.01,
+            -0.01 - 0.0001,
+        ]
+    )
+    assert result["net_compounded_return"] == pytest.approx(
+        np.prod(1.0 + expected) - 1.0
+    )
+
+
+def test_multi_period_agreement_filter_rejects_mixed_path():
+    actual = np.array([[0.01, 0.01, 0.01], [0.01, 0.01, 0.01]])
+    predicted = np.array([[0.02, -0.005, 0.01], [0.01, 0.01, 0.01]])
+
+    result = multi_period_strategy_metrics(
+        actual,
+        predicted,
+        threshold_bps=0.0,
+        transaction_cost_bps=0.0,
+        periods_per_year=1764,
+        position_mode="long_only",
+        require_all_steps_agree=True,
+    )
+
+    assert result["trades"] == 1
+    assert result["signal_rule"] == "cumulative_return_and_all_steps_agree"
+
+
+def test_build_report_uses_non_overlapping_multi_candle_strategy():
+    timeline = np.array([0.01, -0.01, 0.02, 0.01, -0.02])
+    actual_steps = np.lib.stride_tricks.sliding_window_view(timeline, 3)
+    predicted_steps = actual_steps * 0.8
+    actual = np.prod(1.0 + actual_steps, axis=1) - 1.0
+    predicted = np.prod(1.0 + predicted_steps, axis=1) - 1.0
+
+    report = build_report(
+        actual,
+        predicted,
+        predicted - 0.01,
+        predicted + 0.01,
+        predicted - 0.02,
+        predicted + 0.02,
+        previous_return=-0.005,
+        trainval_mean_return=0.001,
+        thresholds_bps=[0.0],
+        transaction_cost_bps=1.0,
+        periods_per_year=1764,
+        y_true_steps=actual_steps,
+        y_pred_steps=predicted_steps,
+    )
+
+    assert report["forecast"]["horizon_periods"] == 3
+    assert "sign_strategy" not in report
+    assert "multi_candle_strategy" in report
+    assert len(
+        report["multi_candle_strategy"]["all_steps_positive_threshold_sweep"]
+    ) == 1
+
+
+def test_horizon_arrays_reads_multi_step_columns():
+    import pandas as pd
+
+    frame = pd.DataFrame(
+        {
+            "y": [0.0],
+            "pred": [0.0],
+            "y_h1": [0.01],
+            "pred_h1": [0.02],
+            "y_h2": [-0.01],
+            "pred_h2": [-0.02],
+        }
+    )
+
+    actual, predicted = horizon_arrays(frame)
+
+    np.testing.assert_array_equal(actual, [[0.01, -0.01]])
+    np.testing.assert_array_equal(predicted, [[0.02, -0.02]])

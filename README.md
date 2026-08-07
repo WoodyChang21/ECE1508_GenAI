@@ -1,6 +1,6 @@
 # ECE1508 GenAI — Intraday SPY Forecasting with Mamba
 
-This project forecasts one-step-ahead intraday SPY (S&P 500 ETF) returns with **Mamba**, an attention-free selective state-space model. Each hourly row is projected from the target plus 20 historical market features into a continuous embedding; causal Mamba blocks process the lookback window and the final hidden state predicts the next return.
+This project forecasts the next three intraday SPY (S&P 500 ETF) returns together with **Mamba**, an attention-free selective state-space model. Each hourly row is projected from the target plus 20 historical market features into a continuous embedding; causal Mamba blocks process the lookback window and the final hidden state predicts the three-return path. A one-step compatibility mode remains available with `--forecast-horizon 1`.
 
 ---
 
@@ -117,7 +117,7 @@ Creates a **walk-forward** train/val/test split. No shuffling — future data ne
 | Test | 2024-01-02 → 2025-05-30 | 2,469 | Final held-out evaluation — never touched during development |
 | **Total** | | **25,241** | Exact match with `features.parquet` |
 
-The validation set (2023) is used exclusively for selecting the Mamba input lookback window and calibrating prediction intervals. Candidates are 24h, 60h, 120h, and 240h lookback windows.
+The validation set (2023) is used exclusively for selecting the Mamba input lookback window and calibrating prediction intervals. Default candidates are 24, 60, and 120 hourly bars. A 240-bar candidate can still be requested explicitly, but it is omitted by default because it costs substantially more and the existing one-step run selected 24 bars.
 
 ---
 
@@ -204,7 +204,7 @@ This is intentional: overnight gaps are a real market phenomenon and carry infor
 The FMP stable API does not carry `^VIX` hourly data before 2023. VIXY (ProShares VIX Short-Term Futures ETF) is used as a proxy. VIXY tracks VIX futures (not the VIX spot index) and decays structurally over time due to negative roll yield. The raw close is log-transformed in `vix_log` to reduce scale differences; `vix_change_1h` is used for directional information.
 
 ### Lookback Window is a Hyperparameter
-Mamba's input context length is **not fixed**. Candidate windows of 24h, 60h, 120h, and 240h are evaluated on the validation set. The dataset is sized to support all of these without excessive warm-up data loss.
+Mamba's input context length is **not fixed**. Candidate windows of 24, 60, and 120 hourly bars are evaluated on the validation set, and only the best one is used for final training. They represent roughly 3.4, 8.6, and 17 trading days at seven bars per day; they are alternatives, not four simultaneous model inputs. Add `240` to `--lookbacks` only when testing whether roughly 34 trading days adds stable validation value.
 
 ### Data Not Committed to Git
 All files under `data/` are gitignored. To reproduce the dataset from scratch:
@@ -256,9 +256,9 @@ pip install -r requirements-model.txt
 python scripts/models/train_mamba.py
 ```
 
-The default run tunes lookbacks `[24, 60, 120, 240]` on validation MAE, retrains the selected configuration on train+validation data, evaluates the held-out test set, and writes `data/predictions/mamba_preds.parquet`. Scaling is fitted on training data during tuning and on train+validation data only for final training. The test target is never used for fitting or interval calibration.
+The default run predicts three future hourly returns together and tunes lookbacks `[24, 60, 120]` on the validation MAE of the compounded three-candle return. It retrains the selected configuration on train+validation data, evaluates the held-out test set, and writes `data/predictions/mamba_preds.parquet`. Scaling is fitted on training data during tuning and on train+validation data only for final training. The test target is never used for fitting or interval calibration.
 
-The output follows the existing comparison schema: `datetime`, `y`, `pred`, 80% and 90% interval bounds, and `model`. Intervals are formed from validation residual quantiles.
+The output retains the comparison schema (`datetime`, `y`, `pred`, interval bounds, and `model`), where `y` and `pred` are compounded horizon returns. It also includes `y_h1`...`y_h3` and `pred_h1`...`pred_h3`, plus the horizon end time. Intervals are formed from validation residual quantiles of the compounded return.
 
 For a quick CPU integration check rather than a meaningful experiment:
 
@@ -295,15 +295,15 @@ python scripts/models/evaluate_mamba.py \
   --transaction-cost-bps 1
 ```
 
-Both modes write a full report to `data/predictions/mamba_eval.json`; checkpoint mode also writes fresh per-row forecasts to `data/predictions/mamba_eval.parquet`. The report includes point-forecast accuracy, zero/mean/lag-one forecast baselines, validation-calibrated interval coverage, and chronological threshold sweeps for combined long/short, long-only, and short-only strategies. These three breakdowns are produced automatically with the same command. Transaction cost is a one-way cost on position turnover; use `0` for a frictionless diagnostic and a realistic nonzero value for performance assessment.
+Both modes write a full report to `data/predictions/mamba_eval.json`; checkpoint mode also writes fresh forecasts to `data/predictions/mamba_eval.parquet`. For a three-step checkpoint, the report includes cumulative-return and all-three-agree threshold sweeps for combined long/short, long-only, and short-only trading. Positions are held for exactly three candles, only one position may be open, and entry and exit costs are charged. The evaluator intentionally does not simulate Steven's take-profit because Mamba predicts returns rather than future OHLC ranges. A legacy one-step checkpoint continues to produce the original one-period sign-strategy report.
 
-The evaluator checks the saved feature order, model settings, scaler, and lookback. The current checkpoint format does not store hashes of the data files, so use the same `val.parquet` and `test.parquet` versions that were present in Colab.
+The evaluator checks the saved feature order, model settings, scaler, lookback, and forecast horizon. The checkpoint format does not store hashes of the data files, so use the same `val.parquet` and `test.parquet` versions that were present in Colab.
 
 ### Run tests
 
 ```bash
 pytest tests/ -v
-# Expected: 29 passed
+# Expected: 44 passed
 ```
 
 ---
