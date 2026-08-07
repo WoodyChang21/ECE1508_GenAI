@@ -1,12 +1,15 @@
 """Evaluate PatchTST and the CVAE on the same fixed test window set.
 
---patchtst-checkpoint accepts either architecture's checkpoint -- the original
-hand-rolled PatchTST (src/models/patchtst.py) or the HF PatchTSTModel-backed PatchTSTHF
-(src/models/patchtst_hf.py) -- auto-detected from the checkpoint's saved config (see
-detect_patchtst_arch). The HF architecture only supports a fixed context_length (no
-variable-length curriculum), so when it's detected, test/plot windows are restricted to
-that fixed length instead of steven's original 2-10 day curriculum -- see
-build_patchtst_model/run_patchtst and the arch branches in main()/make_plots().
+--patchtst-checkpoint accepts any of three checkpoint architectures -- the original
+hand-rolled PatchTST (src/models/patchtst.py), the HF PatchTSTModel-backed PatchTSTHF
+(src/models/patchtst_hf.py), or its volume-dropped variant PatchTSTHFPriceOnly -- all
+auto-detected from the checkpoint's saved config (see detect_patchtst_arch). Both HF
+variants only support a fixed context_length (no variable-length curriculum), so when
+either is detected, test/plot windows are restricted to that fixed length instead of
+steven's original 2-10 day curriculum -- see build_patchtst_model/run_patchtst and the
+arch branches in main()/make_plots(). PatchTSTHFPriceOnly has no volume output at all;
+run_patchtst synthesizes a dummy all-zero volume so downstream code keeps working, and
+main() logs a warning that patchtst_volume_mae_rmse is meaningless for that arch.
 
 Usage:
     python steven/src/evaluate.py \\
@@ -58,7 +61,7 @@ from src.data_pipeline import (
 )
 from src.models.cvae_inpainting import CVAEInpainting
 from src.models.patchtst import PatchTST
-from src.models.patchtst_hf import PatchTSTHF
+from src.models.patchtst_hf import PRICE_ONLY_CHANNEL_IDX, PatchTSTHF, PatchTSTHFPriceOnly
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
@@ -134,21 +137,29 @@ def derive_output_suffix(patchtst_checkpoint_path: str) -> str:
     return ""
 
 
-def detect_patchtst_arch(model_cfg: dict) -> str:
-    """'hf' for the HF PatchTSTModel-backed PatchTSTHF (src/models/patchtst_hf.py,
-    identifiable by its channel_attention key), 'custom' for the original hand-rolled
-    PatchTST (src/models/patchtst.py, which has no such key). Auto-detected from the
-    checkpoint's saved config so --patchtst-checkpoint works for either without a
-    separate CLI flag."""
-    return "hf" if "channel_attention" in model_cfg else "custom"
+def detect_patchtst_arch(cfg: dict) -> str:
+    """'hf_priceonly' for the volume-dropped HF variant PatchTSTHFPriceOnly
+    (src/models/patchtst_hf.py, identifiable by the top-level drop_volume flag saved by
+    train_patchtst_hf_channel_attention_{True,False}.ipynb's current version), 'hf' for
+    the HF PatchTSTModel-backed PatchTSTHF (identifiable by cfg['model']'s
+    channel_attention key), 'custom' for the original hand-rolled PatchTST
+    (src/models/patchtst.py, which has neither). Auto-detected from the checkpoint's
+    saved config so --patchtst-checkpoint works for any of the three without a separate
+    CLI flag. Takes the *whole* saved config (not just cfg['model']) -- drop_volume lives
+    at the top level, alongside context_length/data_path/seed, not inside 'model'."""
+    if cfg.get("drop_volume"):
+        return "hf_priceonly"
+    return "hf" if "channel_attention" in cfg["model"] else "custom"
 
 
 def build_patchtst_model(pt_ckpt: dict, device: torch.device):
     """Reconstructs whichever PatchTST architecture produced pt_ckpt (see
     detect_patchtst_arch), loads its weights, and returns (model, arch)."""
     cfg = pt_ckpt["config"]
-    arch = detect_patchtst_arch(cfg["model"])
-    if arch == "hf":
+    arch = detect_patchtst_arch(cfg)
+    if arch == "hf_priceonly":
+        model = PatchTSTHFPriceOnly(context_length=cfg["context_length"], **cfg["model"])
+    elif arch == "hf":
         model = PatchTSTHF(context_length=cfg["context_length"], **cfg["model"])
     else:
         model = PatchTST(**cfg["model"])
@@ -158,11 +169,22 @@ def build_patchtst_model(pt_ckpt: dict, device: torch.device):
 
 
 def run_patchtst(patchtst, arch: str, context: torch.Tensor, patch_pad: torch.Tensor):
-    """Dispatches to whichever calling convention this architecture uses. context is
-    already masked_tensor[:MAX_CONTEXT, :N_FEATURE_CHANNELS] either way (see
-    to_patchtst_input) -- only the HF model ignores patch_pad, since PatchTSTHF has a
-    fixed context_length and was never trained on padded/short-context windows (see
-    module docstring)."""
+    """Dispatches to whichever calling convention this architecture uses, and always
+    returns (price, volume) regardless of arch. context is already
+    masked_tensor[:MAX_CONTEXT, :N_FEATURE_CHANNELS] either way (see to_patchtst_input);
+    only the two HF variants ignore patch_pad, since they have a fixed context_length and
+    were never trained on padded/short-context windows (see module docstring).
+
+    'hf_priceonly' further slices context down to PRICE_ONLY_CHANNEL_IDX (volume
+    excluded) before calling the model, and synthesizes a dummy all-zero volume tensor
+    since PatchTSTHFPriceOnly has no volume output at all -- callers/metrics that read
+    the returned volume for this arch are reading a placeholder, not a real prediction
+    (see the warning logged in main())."""
+    if arch == "hf_priceonly":
+        context_price_only = context[..., PRICE_ONLY_CHANNEL_IDX]
+        price = patchtst(context_price_only)
+        volume = torch.zeros(price.shape[0], price.shape[1], device=price.device, dtype=price.dtype)
+        return price, volume
     if arch == "hf":
         return patchtst(context)
     return patchtst(context, patch_pad)
@@ -703,10 +725,10 @@ def make_plots(df, feat, opens, closes, patchtst, arch, cvae, test_sampler, args
     records = []
     plotted = 0
     for i in range(args.num_plot_samples):
-        # PatchTSTHF only supports its trained fixed context_length (no padding support --
-        # see module docstring), so plot windows are pinned to MAX_CONTEXT instead of
-        # sampling steven's original variable-length curriculum when arch == 'hf'.
-        ctx_bars = MAX_CONTEXT if arch == "hf" else int(rng.choice(CONTEXT_LENGTHS))
+        # Both HF variants only support their trained fixed context_length (no padding
+        # support -- see module docstring), so plot windows are pinned to MAX_CONTEXT
+        # instead of sampling steven's original variable-length curriculum.
+        ctx_bars = MAX_CONTEXT if arch in ("hf", "hf_priceonly") else int(rng.choice(CONTEXT_LENGTHS))
         starts = test_sampler.valid_starts(ctx_bars)
         if len(starts) == 0:
             logger.warning("no valid starts for ctx_bars=%d, skipping sample %d", ctx_bars, i)
@@ -850,11 +872,17 @@ def main() -> None:
 
     patchtst, arch = build_patchtst_model(pt_ckpt, device)
     logger.info("patchtst checkpoint architecture: %s", arch)
+    if arch == "hf_priceonly":
+        logger.warning(
+            "arch=hf_priceonly: this checkpoint has no volume output at all -- "
+            "patchtst_volume_mae_rmse below reflects a dummy all-zero prediction "
+            "(see run_patchtst), not a real forecast. Ignore it."
+        )
 
     test_sampler = WindowSampler(*bounds["test"])
     rng = np.random.default_rng(args.seed)
-    if arch == "hf":
-        # PatchTSTHF only supports its trained fixed context_length -- no padding
+    if arch in ("hf", "hf_priceonly"):
+        # Both HF variants only support their trained fixed context_length -- no padding
         # support, never trained on shorter/padded windows (see module docstring) --
         # so evaluation is restricted to that fixed length instead of steven's original
         # 2-10 day curriculum. All windows land in the 'long' bucket below; compare
