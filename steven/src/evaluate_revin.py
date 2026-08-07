@@ -90,7 +90,9 @@ def resolve_device(name: str) -> torch.device:
 CASE_LABELS = ["win_take_profit", "win_expiry", "lose_expiry", "skipped", "no_trade"]
 
 
-def take_profit_exit(true_ohlc: np.ndarray, take_profit: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def take_profit_exit(
+    true_ohlc: np.ndarray, take_profit: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Simulates a take-profit-only limit sell order (no stop-loss -- dropped on steven
     branch, see docs/experiments.md there for rationale) placed at the same time as the
     close_0 buy. Walks the HORIZON real bars in order; the first bar that reaches
@@ -102,7 +104,10 @@ def take_profit_exit(true_ohlc: np.ndarray, take_profit: np.ndarray) -> tuple[np
     If neither ever happens across all HORIZON bars, the position is force-closed at the
     last bar's real close instead (order expiry). true_ohlc: (N,HORIZON,4) real
     [open,high,low,close]. take_profit: (N,). Returns (realized_sell_price (N,),
-    hit_take_profit (N,) bool)."""
+    hit_take_profit (N,) bool, bars_held (N,) int -- 1-indexed bar the position actually
+    closed on, HORIZON on expiry -- lets the caller resume the walk as soon as a position
+    is actually closed instead of always waiting the full HORIZON bars, see
+    run_walk_forward)."""
     n = true_ohlc.shape[0]
     open_ = true_ohlc[:, :, OPEN_IDX]
     low = true_ohlc[:, :, OHLC_COLS.index("low")]
@@ -110,6 +115,7 @@ def take_profit_exit(true_ohlc: np.ndarray, take_profit: np.ndarray) -> tuple[np
 
     sell_price = true_ohlc[:, HORIZON - 1, CLOSE_IDX].copy()  # default: last horizon bar's real close
     hit_take_profit = np.zeros(n, dtype=bool)
+    bars_held = np.full(n, HORIZON, dtype=int)  # default: full horizon (expiry)
     resolved = np.zeros(n, dtype=bool)
 
     for bar in range(HORIZON):
@@ -119,9 +125,10 @@ def take_profit_exit(true_ohlc: np.ndarray, take_profit: np.ndarray) -> tuple[np
         sell_price[touched] = take_profit[touched]
         sell_price[gapped] = open_[:, bar][gapped]
         hit_take_profit[touched | gapped] = True
+        bars_held[touched | gapped] = bar + 1
         resolved |= touched | gapped
 
-    return sell_price, hit_take_profit
+    return sell_price, hit_take_profit, bars_held
 
 
 def classify_walk_forward_decision(
@@ -282,12 +289,18 @@ def run_walk_forward(
 ) -> dict:
     """Walks the test range in real chronological order, one hour at a time, always
     using the full ctx_bars context: "a trader checks in every hour with the most recent
-    ctx_bars candles." No trade -> advance 1 bar and re-check next hour. Trade -> lock
-    out the next HORIZON bars regardless of whether/when the take-profit fills within
-    them, then resume. Equity compounds trade to trade starting from 1.0, so total_return
-    is a real simulated account balance over time, never a sum across possibly-
-    overlapping trades. Mirrors steven's run_walk_forward exactly, just with
-    build_raw_ohlc_window instead of build_window."""
+    ctx_bars candles." No trade -> advance 1 bar and re-check next hour. Trade -> resume
+    as soon as the position actually closes (bars_held from take_profit_exit -- 1, 2, or
+    HORIZON on expiry), not always after a fixed HORIZON bars -- this is a real, live-
+    knowable event (the trader sees their position close and is free to look again), not
+    a lookahead leak, and avoids leaving capital idle for bars after an early take-profit
+    fill. Equity compounds trade to trade starting from 1.0, so total_return is a real
+    simulated account balance over time, never a sum across possibly-overlapping trades.
+
+    Each decision also records direction_correct (did price actually end up above close_0
+    by the last horizon bar, independent of the take-profit mechanics) -- used by
+    confidence_calibration to check whether the confidence score tracks correctness at
+    all, separately from whether a trade was actually taken."""
     start_idx = test_lo
     equity = 1.0
     trades: list[dict] = []
@@ -305,12 +318,14 @@ def run_walk_forward(
         meets_return_threshold = predicted_return >= min_return_threshold
         confident_enough = confidence >= confidence_threshold
 
-        sell_price_arr, hit_tp_arr = take_profit_exit(true_ohlc[None], np.array([take_profit]))
+        sell_price_arr, hit_tp_arr, bars_held_arr = take_profit_exit(true_ohlc[None], np.array([take_profit]))
         sell_price, hit_tp = float(sell_price_arr[0]), bool(hit_tp_arr[0])
+        bars_held = int(bars_held_arr[0])
         trade_return = float(sell_price / close_0 - 1.0)
         label, would_trade = classify_walk_forward_decision(
             eligible, meets_return_threshold, confident_enough, hit_tp, trade_return
         )
+        direction_correct = bool(true_ohlc[HORIZON - 1, CLOSE_IDX] > close_0)
 
         decision = {
             "start_idx": start_idx,
@@ -321,14 +336,16 @@ def run_walk_forward(
             "would_trade": would_trade,
             "sell_price": sell_price,
             "hit_take_profit": hit_tp,
+            "bars_held": bars_held,
             "trade_return": trade_return,
+            "direction_correct": direction_correct,
         }
         decisions.append(decision)
 
         if would_trade:
             equity *= 1.0 + trade_return
             trades.append(decision)
-            start_idx += HORIZON
+            start_idx += bars_held
         else:
             start_idx += 1
 
@@ -352,15 +369,77 @@ def walk_forward_stats(df: pd.DataFrame, result: dict, ctx_bars: int) -> dict:
 
     rets = np.array([t["trade_return"] for t in trades])
     hits = np.array([t["hit_take_profit"] for t in trades])
+    held = np.array([t["bars_held"] for t in trades])
     out["win_rate"] = float((rets > 0).mean())
     out["take_profit_rate"] = float(hits.mean())
     out["avg_return"] = float(rets.mean())
+    out["avg_bars_held"] = float(held.mean())  # < HORIZON means the early-resume change (see run_walk_forward) is doing something
 
     first, last = trades[0], trades[-1]
     entry_idx = first["start_idx"] + ctx_bars - 1  # this trade's close_0 bar
-    exit_idx = last["start_idx"] + ctx_bars + HORIZON - 1  # last horizon bar
+    exit_idx = last["start_idx"] + ctx_bars - 1 + last["bars_held"]  # the bar this trade actually closed on
     out.update(equity_stats(df, entry_idx, exit_idx, first["close_0"], last["sell_price"], out["total_return"]))
     return out
+
+
+def confidence_calibration(decisions: list[dict], n_bins: int = 5) -> list[dict]:
+    """Checks whether `confidence` actually tracks correctness, independent of whether a
+    decision was actually traded (would_trade is gated by min_return_threshold too, which
+    would otherwise confound this check). Uses every decision point's trade_return/
+    direction_correct -- both computed unconditionally in run_walk_forward regardless of
+    would_trade, i.e. "what would have happened had this been traded" -- so this can run
+    on the full decision log without re-simulating anything.
+
+    Decisions with confidence == 0 (not coherent-up -- see
+    patchtst_revin_walk_forward_confidence) are reported as their own row, separately from
+    the percentile-rank bins below: confidence==0 isn't a low percentile on the same scale,
+    it's a qualitatively different case (the model made no directional call at all).
+
+    The remaining (coherent-up, confidence in (0, 1]) decisions are split into n_bins
+    equal-width confidence bins. For each bin: how many decisions landed there, the
+    win rate (trade_return > 0) and directional accuracy (direction_correct) within it,
+    and the mean confidence actually observed in that bin. If confidence is doing real
+    work, win_rate/direction_accuracy should trend upward across the bins; if it's flat or
+    noisy, the score isn't tracking correctness, just predicted-move size."""
+    zero_conf = [d for d in decisions if d["confidence"] == 0.0]
+    scored = [d for d in decisions if d["confidence"] > 0.0]
+
+    rows = []
+    if zero_conf:
+        rets = np.array([d["trade_return"] for d in zero_conf])
+        correct = np.array([d["direction_correct"] for d in zero_conf])
+        rows.append({
+            "bin": "confidence == 0 (not coherent-up)",
+            "n": len(zero_conf),
+            "win_rate": float((rets > 0).mean()),
+            "direction_accuracy": float(correct.mean()),
+            "mean_confidence": 0.0,
+        })
+
+    if scored:
+        edges = np.linspace(0.0, 1.0, n_bins + 1)
+        confidences = np.array([d["confidence"] for d in scored])
+        bin_idx = np.clip(np.digitize(confidences, edges[1:-1], right=True), 0, n_bins - 1)
+        for b in range(n_bins):
+            in_bin = [d for d, bi in zip(scored, bin_idx) if bi == b]
+            if not in_bin:
+                rows.append({
+                    "bin": f"[{edges[b]:.2f}, {edges[b+1]:.2f}]", "n": 0,
+                    "win_rate": None, "direction_accuracy": None, "mean_confidence": None,
+                })
+                continue
+            rets = np.array([d["trade_return"] for d in in_bin])
+            correct = np.array([d["direction_correct"] for d in in_bin])
+            confs = np.array([d["confidence"] for d in in_bin])
+            rows.append({
+                "bin": f"[{edges[b]:.2f}, {edges[b+1]:.2f}]",
+                "n": len(in_bin),
+                "win_rate": float((rets > 0).mean()),
+                "direction_accuracy": float(correct.mean()),
+                "mean_confidence": float(confs.mean()),
+            })
+
+    return rows
 
 
 def main() -> None:
@@ -398,6 +477,11 @@ def main() -> None:
     )
     logger.info("walk-forward: %d trades / %d decisions", len(wf["trades"]), len(wf["decisions"]))
 
+    calibration = confidence_calibration(wf["decisions"])
+    logger.info("confidence calibration (does confidence track correctness?):")
+    for row in calibration:
+        logger.info("  %s", row)
+
     results = {
         "walk_forward": {
             "checkpoint": args.checkpoint,
@@ -408,6 +492,7 @@ def main() -> None:
             "buy_and_hold": buy_and_hold_benchmark(df, wf_entry_idx, test_hi - 1),
             "naive_periodic": naive_periodic_benchmark(df, closes, wf_entry_idx, test_hi),
             "patchtst_revin": walk_forward_stats(df, wf, ctx_bars),
+            "confidence_calibration": calibration,
         }
     }
 
