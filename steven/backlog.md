@@ -207,7 +207,7 @@ configuration found so far. Caveat that applies to every number in this section:
 checkpoint over one fixed test period -- real risk of overfitting to this specific window given how many
 configurations have now been tried against it.
 
-## Fixed, volatility-calibrated stop-loss -- explored ad hoc, not implemented
+## Fixed, volatility-calibrated stop-loss -- implemented (2026-08-07)
 
 **Motivation**: after finding CVAE's win rate and take-profit rate were both high but total return was
 still negative (663 trades, 86.7% win rate, 86.4% take-profit rate, -1.67% total return -- see the "trade
@@ -231,15 +231,52 @@ stop wins over take-profit on same-bar overlap)**:
   routinely on ordinary intrabar noise rather than only on genuine adverse moves, the same failure mode
   that killed the mirrored 1:1 version.
 
-**Status: not implemented in the shipped backtest, and not re-tested since.** This was run via an ad hoc
-diagnostic script, before CVAE's quality gate was found net-harmful and removed (see the "trade confidence"
-entry above). Removing that gate alone already flipped CVAE's total return from -1.67% to +8.60% without
-any stop-loss at all, which somewhat reduces the urgency here -- but the underlying tail-risk concern (some
-single trade losing several percent) is orthogonal to the gate question and could still matter in a
-different sample or period. Before adopting a 2% (or any) fixed stop as part of the real strategy: re-run
-this same 2%/1%/0.5% sweep against the current no-gate baseline to confirm the finding still holds, then
-implement it as an actual bracket order in `take_profit_exit()` (or a sibling function) rather than a
-one-off script, with its own test coverage.
+**Update (2026-08-07): re-validated against the current no-gate baseline, and shipped.** The A/B test that
+removed CVAE's quality gate (see the "trade confidence" entry above) fixed total return but exposed a real
+asymmetry underneath: CVAE's average loss runs ~7x its average win (payoff ratio ~0.14 -- avg win +0.09%,
+avg loss -0.64%); PatchTST is healthier (~0.64) but still loss-skewed. Re-ran the 0.5%/1%/2% sweep above
+against the *current, shipped, no-gate* baseline (684 CVAE / 460 PatchTST trades), plus 1.5% and 3%, on
+both models this time (the original test only covered CVAE):
+
+| stop-loss % | CVAE total return | CVAE payoff | CVAE SL hits | PatchTST total return | PatchTST payoff | PatchTST SL hits |
+|---|---|---|---|---|---|---|
+| none (baseline) | +3.95% | 0.144 | -- | +7.14% | 0.639 | -- |
+| 0.5% | -4.51% | 0.195 | 84 | +6.26% | 0.733 | 89 |
+| 1% | +0.51% | 0.156 | 33 | +10.35% | 0.679 | 27 |
+| 1.5% | +7.74% | 0.157 | 12 | +10.65% | 0.676 | 9 |
+| **2% (shipped)** | **+6.79%** | 0.152 | 6 | **+9.32%** | 0.664 | 5 |
+| 3% | +5.80% | 0.149 | 1 | +5.45% | 0.630 | 4 |
+
+The effect held (even improved vs. the earlier gated-baseline test) and now clearly benefits **both**
+models, not just CVAE, so it's implemented as a single **shared** `--stop-loss-pct` (default `0.02`), not
+per-model like the return thresholds -- the right stop level is about how large a genuine adverse move
+looks like in this one instrument (the same market for both models), not about either model's own
+predicted-edge scale.
+
+**Why ship 2%, not the empirical peak (1.5%)**: 1.5% is marginally better in this one sweep, but only
+6-12 stop-loss hits are driving that number for either model -- thin enough that the "peak" is plausibly
+just noise from this one fixed test window rather than a real optimum (this file already flags overfitting
+risk from having tuned many things against the same window -- see the caveat at the end of the "trade
+confidence" entry above). 2% is the round, principled choice instead: it sits just outside
+`train_exit_return_bound`'s own empirical p99 (~1.9%, the same bound already used to calibrate the
+take-profit shrink), matches the original motivating instinct, and is still a strong performer for both
+models.
+
+**Why 2% counts as "forgiving," not just "safe"**: median trade sizes are tiny (CVAE median win/loss:
++0.04% / -0.37%; PatchTST: +0.22% / -0.22%). A 2% stop is 5-50x larger than a typical trade's move, so it
+essentially never fires on ordinary trades -- confirmed above (~1% of trades trigger it at 2% for either
+model). It's a tail-risk cap, not a tight leash, which is exactly why the tighter 0.5%/1% levels backfire:
+small enough to trigger on everyday intrabar noise instead of only on genuine adverse moves -- the same
+failure mode that killed the original mirrored-to-target 1:1 stop-loss (see `v1.md`).
+
+**Implementation**: `take_profit_exit()` was replaced by `bracket_exit()` (`src/evaluate.py`), which checks
+both levels per bar and resolves a same-bar overlap **pessimistically -- stop-loss wins**. OHLC bars don't
+record intrabar order, so a bar whose range would trigger both levels at once is genuinely ambiguous;
+assuming the optimistic order (take-profit touched first) would quietly inflate the backtest's own numbers
+with an assumption that can't be verified from OHLC data, so the worst-case assumption is the defensible
+one for a strategy's self-reported results. A stop-loss hit gets its own case, `lose_stop_loss`, in
+`CASE_LABELS`/`classify_walk_forward_decision` (a stop-loss hit is always a loss by construction, so no
+separate win variant is needed) -- the outcome-breakdown table now has 6 rows instead of 5.
 
 ## Middle-masking ablation
 

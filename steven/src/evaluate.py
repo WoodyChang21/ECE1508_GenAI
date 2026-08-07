@@ -94,6 +94,17 @@ def parse_args() -> argparse.Namespace:
         "models. Also a first-pass heuristic -- re-check this value after any CVAE retrain that "
         "might shift its predicted-edge scale again (see backlog.md's 'trade confidence' entry).",
     )
+    p.add_argument(
+        "--stop-loss-pct", type=float, default=0.02,
+        help="Fraction below entry (e.g. 0.02 = 2%%) at which a trade is force-closed as a loss, on "
+        "top of the take-profit order -- a bracket order (see bracket_exit). SHARED across both "
+        "models, unlike the return thresholds above: the right stop level is about how large a "
+        "genuine adverse move looks like in this one instrument, not about either model's own "
+        "predicted-edge scale. Deliberately loose relative to typical trade sizes (2%% sits just "
+        "outside the training data's own empirical p99 |anchored log return|, ~1.9%% -- see "
+        "train_exit_return_bound), so it only fires on genuine tail moves, not everyday noise -- "
+        "see backlog.md's stop-loss entry for the sweep that motivated this value. <= 0 disables it.",
+    )
     return p.parse_args()
 
 
@@ -107,24 +118,36 @@ def resolve_device(name: str) -> torch.device:
     return torch.device(name)
 
 
-def take_profit_exit(
-    true_ohlc: np.ndarray, take_profit: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Simulates a take-profit-only limit sell order (no stop-loss -- see the module note
-    above run_walk_forward for why) placed at the same time as the close_0 buy. Walks the
-    3 REAL horizon bars in order; the first bar that reaches take_profit fills the order,
-    in one of two ways:
-    - **Touched mid-bar** (low <= take_profit <= high): fills at take_profit itself --
-      the bar's range crossed the limit price but didn't open beyond it.
-    - **Gapped through** (low > take_profit, i.e. the entire bar -- including its open --
-      already sits above the target): a real limit sell order guarantees *at least* the
-      limit price, so if the market gaps straight past it, the order fills immediately at
-      the open, not at the stale take_profit level (which the market never actually
-      touched, since low already clears it). This is still a take-profit win, just filled
-      at a better-than-target price -- not an expiry.
-    If neither ever happens across all 3 bars, the position is force-closed at the 3rd
+def bracket_exit(
+    true_ohlc: np.ndarray, take_profit: np.ndarray, stop_loss: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Simulates a bracket order (take-profit limit sell above entry, stop-loss below it --
+    see the module note above run_walk_forward for the current stop-loss level and why it's
+    shared across models) placed at the same time as the close_0 buy. Walks the 3 REAL
+    horizon bars in order; the first bar that reaches either level fills the order, in one
+    of two ways per level:
+    - **Touched mid-bar** (low <= level <= high): fills at that level itself -- the bar's
+      range crossed it but didn't open beyond it.
+    - **Gapped through** (take-profit: low > take_profit; stop-loss: high < stop_loss,
+      i.e. the entire bar -- including its open -- already sits beyond the level): a real
+      limit/stop order guarantees *at least* that price, so if the market gaps straight
+      past it, the order fills immediately at the open, not at the stale level (which the
+      market never actually touched). Still counts as that level being hit, not an expiry.
+    Pass stop_loss=-inf for a row to disable its stop-loss entirely (it can then never
+    touch or gap, by construction).
+
+    **Same-bar tie-break**: OHLC bars don't record intrabar order, so a bar whose range
+    would trigger both levels at once is genuinely ambiguous. Resolved pessimistically --
+    stop-loss wins -- by checking stop-loss first each bar and excluding any row it just
+    resolved from that bar's take-profit check. Assuming the optimistic order (take-profit
+    first) would quietly inflate the backtest's own numbers with an assumption we can't
+    verify from OHLC data; the worst-case assumption is the defensible one for a strategy's
+    self-reported results.
+
+    If neither level is ever hit across all 3 bars, the position is force-closed at the 3rd
     bar's real close instead (order expiry). true_ohlc: (N,3,4) real [open,high,low,close].
-    take_profit: (N,). Returns (realized_sell_price (N,), hit_take_profit (N,) bool)."""
+    take_profit, stop_loss: (N,). Returns (realized_sell_price (N,), hit_take_profit (N,)
+    bool, hit_stop_loss (N,) bool)."""
     n = true_ohlc.shape[0]
     open_ = true_ohlc[:, :, 0]
     low = true_ohlc[:, :, 2]
@@ -132,25 +155,34 @@ def take_profit_exit(
 
     sell_price = true_ohlc[:, HORIZON - 1, 3].copy()  # default: last horizon bar's real close
     hit_take_profit = np.zeros(n, dtype=bool)
+    hit_stop_loss = np.zeros(n, dtype=bool)
     resolved = np.zeros(n, dtype=bool)
 
     for bar in range(HORIZON):
-        touched = (~resolved) & (low[:, bar] <= take_profit) & (take_profit <= high[:, bar])
-        gapped = (~resolved) & (low[:, bar] > take_profit)  # whole bar, incl. open, already above target
+        sl_touched = (~resolved) & (low[:, bar] <= stop_loss) & (stop_loss <= high[:, bar])
+        sl_gapped = (~resolved) & (high[:, bar] < stop_loss)  # whole bar, incl. open, already below stop
+        sl_hit = sl_touched | sl_gapped
 
-        sell_price[touched] = take_profit[touched]
-        sell_price[gapped] = open_[:, bar][gapped]
-        hit_take_profit[touched | gapped] = True
-        resolved |= touched | gapped
+        tp_touched = (~resolved) & (~sl_hit) & (low[:, bar] <= take_profit) & (take_profit <= high[:, bar])
+        tp_gapped = (~resolved) & (~sl_hit) & (low[:, bar] > take_profit)  # whole bar already above target
 
-    return sell_price, hit_take_profit
+        sell_price[sl_touched] = stop_loss[sl_touched]
+        sell_price[sl_gapped] = open_[:, bar][sl_gapped]
+        sell_price[tp_touched] = take_profit[tp_touched]
+        sell_price[tp_gapped] = open_[:, bar][tp_gapped]
+        hit_stop_loss |= sl_hit
+        hit_take_profit |= tp_touched | tp_gapped
+        resolved |= sl_hit | tp_touched | tp_gapped
+
+    return sell_price, hit_take_profit, hit_stop_loss
 
 
-CASE_LABELS = ["win_take_profit", "win_expiry", "lose_expiry", "skipped", "no_trade"]
+CASE_LABELS = ["win_take_profit", "win_expiry", "lose_expiry", "lose_stop_loss", "skipped", "no_trade"]
 CASE_TITLES = {
     "win_take_profit": "Win -- take-profit hit",
     "win_expiry": "Win -- expiry (gain)",
     "lose_expiry": "Lose -- expiry (loss)",
+    "lose_stop_loss": "Lose -- stop-loss hit",
     "skipped": "Skipped (quality gate or return too small)",
     "no_trade": "No trade (target <= buy)",
 }
@@ -158,7 +190,7 @@ CASE_TITLES = {
 
 def classify_walk_forward_decision(
     eligible: bool, meets_return_threshold: bool, passes_quality_gate: bool,
-    hit_take_profit: bool, trade_return: float,
+    hit_take_profit: bool, hit_stop_loss: bool, trade_return: float,
 ) -> tuple[str, bool]:
     """Sorts one walk-forward decision point into exactly one of CASE_LABELS. Returns
     (label, would_trade) -- would_trade is eligible AND meets_return_threshold AND
@@ -176,14 +208,34 @@ def classify_walk_forward_decision(
     and silently folded every gated skip into whichever win/lose label the window would
     have gotten *had* it been traded -- which answered "what if everything eligible were
     always traded" rather than "what actually happened," and made a highly selective model
-    look like it was winning/losing trades it never actually placed."""
+    look like it was winning/losing trades it never actually placed.
+
+    hit_stop_loss takes priority over trade_return's sign: a stop-loss hit is always a loss
+    by construction (that's what triggered it), so it gets its own case rather than folding
+    into 'lose_expiry' -- see bracket_exit for the fill logic and the module note above
+    run_walk_forward for the current stop-loss level."""
     if not eligible:
         return "no_trade", False
     if not (meets_return_threshold and passes_quality_gate):
         return "skipped", False
+    if hit_stop_loss:
+        return "lose_stop_loss", True
     if hit_take_profit:
         return "win_take_profit", True
     return ("win_expiry" if trade_return > 0 else "lose_expiry"), True
+
+
+def trade_outcome_label(hit_take_profit: bool, hit_stop_loss: bool) -> str:
+    """A decision's raw exit type, for the sample-plot rendering (make_plots/
+    trade_table_text) -- distinct from classify_walk_forward_decision's full CASE_LABELS,
+    which also folds in eligibility/gate/threshold context this doesn't need. Same
+    stop-loss-takes-priority ordering as classify_walk_forward_decision, for the same
+    reason (a stop-loss hit is always a loss by construction)."""
+    if hit_stop_loss:
+        return "stop_loss"
+    if hit_take_profit:
+        return "take_profit"
+    return "expired"
 
 
 def outcome_breakdown(labels: np.ndarray) -> dict:
@@ -317,6 +369,23 @@ def naive_periodic_benchmark(df: pd.DataFrame, closes: np.ndarray, t0: int, test
 # posterior-collapse retrain shifted its predicted-edge scale far below PatchTST's (see
 # backlog.md) -- one absolute number was never going to fit two models with different and
 # potentially shifting output scales.
+#
+# Stop-loss (--stop-loss-pct, default 0.02): removing CVAE's quality gate above fixed its
+# total return but exposed a real asymmetry underneath -- CVAE's average loss runs ~7x its
+# average win (payoff ratio ~0.14; PatchTST's is healthier at ~0.64 but still loss-skewed).
+# Both models place a stop-loss at a fixed percentage below entry now, SHARED across
+# models rather than per-model like min_return_threshold: min_return_threshold calibrates
+# to each model's own predicted-edge scale, but the stop-loss calibrates to how large a
+# genuine adverse move looks like in this one instrument -- the same market for both
+# models, so there's no a priori reason to expect their optimal stop level to differ.
+# Chosen deliberately loose relative to typical trade sizes (median trade returns are well
+# under 1%): 2% sits just outside the training data's own empirical p99 |anchored log
+# return| (~1.9%, see train_exit_return_bound, the same bound already used to calibrate the
+# take-profit shrink), so in practice it only fires on genuine tail moves (~1% of trades),
+# not on everyday intrabar noise. An earlier 1:1-mirrored-to-target stop-loss (much
+# tighter, since take-profit targets are themselves small) was tried and removed for
+# backfiring -- see backlog.md's stop-loss entry for that history and for the full sweep
+# (0.5%-3%) that motivated this fixed, wider level.
 # ---------------------------------------------------------------------------
 
 
@@ -380,18 +449,20 @@ def make_cvae_predict_fn(
 
 def run_walk_forward(
     predict_fn, feat: np.ndarray, opens: np.ndarray, closes: np.ndarray,
-    test_lo: int, test_hi: int, min_return_threshold: float,
+    test_lo: int, test_hi: int, min_return_threshold: float, stop_loss_pct: float,
 ) -> dict:
     """predict_fn(w: dict) -> {take_profit, passes_quality_gate, price} is model-specific
     -- see make_patchtst_predict_fn/make_cvae_predict_fn. min_return_threshold is this
-    model's own (see main() -- no longer a shared value across models). Returns {trades,
-    decisions, equity_final}: `decisions` is every decision point visited (traded or
-    not), each classified into one of CASE_LABELS (see classify_walk_forward_decision)
-    and carrying everything make_plots needs to render it later (price components, real
-    OHLC, buy/sell prices) without re-running inference; `trades` is the subset that
-    actually got traded -- disjoint models can and do follow different real-time paths
-    here, since a trade vs. no-trade call changes how far this model's own clock advances
-    next."""
+    model's own (see main() -- no longer a shared value across models). stop_loss_pct is
+    shared across models (see the module note above -- unlike min_return_threshold, the
+    stop level calibrates to real market volatility, not a model-specific edge scale);
+    <= 0 disables it entirely. Returns {trades, decisions, equity_final}: `decisions` is
+    every decision point visited (traded or not), each classified into one of CASE_LABELS
+    (see classify_walk_forward_decision) and carrying everything make_plots needs to
+    render it later (price components, real OHLC, buy/sell prices) without re-running
+    inference; `trades` is the subset that actually got traded -- disjoint models can and
+    do follow different real-time paths here, since a trade vs. no-trade call changes how
+    far this model's own clock advances next."""
     start_idx = test_lo
     equity = 1.0
     trades: list[dict] = []
@@ -408,12 +479,15 @@ def run_walk_forward(
         predicted_return = take_profit / close_0 - 1.0
         eligible = take_profit > close_0
         meets_return_threshold = predicted_return >= min_return_threshold
+        stop_loss = close_0 * (1.0 - stop_loss_pct) if stop_loss_pct > 0 else -np.inf
 
-        sell_price_arr, hit_tp_arr = take_profit_exit(true_ohlc[None], np.array([take_profit]))
-        sell_price, hit_tp = float(sell_price_arr[0]), bool(hit_tp_arr[0])
+        sell_price_arr, hit_tp_arr, hit_sl_arr = bracket_exit(
+            true_ohlc[None], np.array([take_profit]), np.array([stop_loss])
+        )
+        sell_price, hit_tp, hit_sl = float(sell_price_arr[0]), bool(hit_tp_arr[0]), bool(hit_sl_arr[0])
         trade_return = float(sell_price / close_0 - 1.0)
         label, would_trade = classify_walk_forward_decision(
-            eligible, meets_return_threshold, passes_quality_gate, hit_tp, trade_return
+            eligible, meets_return_threshold, passes_quality_gate, hit_tp, hit_sl, trade_return
         )
 
         decision = {
@@ -427,6 +501,7 @@ def run_walk_forward(
             "would_trade": would_trade,
             "sell_price": sell_price,
             "hit_take_profit": hit_tp,
+            "hit_stop_loss": hit_sl,
             "trade_return": trade_return,
         }
         decisions.append(decision)
@@ -493,30 +568,38 @@ def draw_trade_lines(
     price drawn as a horizontal line starting at the left edge of the horizon box (the
     first of the 3 target/generated candles) and extending to the right edge of the
     panel -- not a line all the way through, since the price only applies once prediction
-    starts. The linestyle is caller-chosen (currently always solid, one per model -- kept
-    generic here so a second line per model, e.g. a future stop-loss, is just another
-    tuple in the list). If a price falls outside the panel's current y-range, the line is
+    starts. The linestyle is caller-chosen (take-profit solid, stop-loss dashed/dotted per
+    model -- kept generic here so each model's second line is just another tuple in the
+    list). If a price falls outside the panel's current y-range, the line is
     pinned just inside the top/bottom edge instead of letting the axis autoscale to it,
     with a text label giving the real price and noting it's out of range -- this keeps
-    the panel's own price scale intact regardless of how extreme a prediction is."""
+    the panel's own price scale intact regardless of how extreme a prediction is. Multiple
+    targets pinned to the same edge (now routine with a stop-loss line added alongside
+    each take-profit line) are stacked with a small vertical offset per line instead of
+    landing exactly on top of each other -- with only take-profit lines this rarely came
+    up, but two lines per model doubles how often two land out-of-range together."""
     y0, y1 = ax.get_ylim()
     x0 = n_shown - HORIZON - 0.5
     x1 = n_shown - 0.5
     margin = (y1 - y0) * 0.08
+    stack_step = (y1 - y0) * 0.04
 
     ax.axhline(buy_price, color="tab:blue", linestyle="--", linewidth=1, zorder=6)
     ax.text(-0.6, buy_price, "buy", color="tab:blue", fontsize=7, va="bottom", ha="left", zorder=6)
 
+    n_above = n_below = 0
     for label, price, color, linestyle in sell_targets:
         if price > y1:
-            line_y = y1 - margin
+            line_y = y1 - margin - n_above * stack_step
+            n_above += 1
             ax.hlines(line_y, x0, x1, color=color, linestyle=linestyle, linewidth=1.4, zorder=7)
             ax.annotate(
                 f"  {label}: {price:.2f} (above range)", xy=(x0, line_y), xytext=(0, -4),
                 textcoords="offset points", color=color, fontsize=7, va="top", ha="left", zorder=7,
             )
         elif price < y0:
-            line_y = y0 + margin
+            line_y = y0 + margin + n_below * stack_step
+            n_below += 1
             ax.hlines(line_y, x0, x1, color=color, linestyle=linestyle, linewidth=1.4, zorder=7)
             ax.annotate(
                 f"  {label}: {price:.2f} (below range)", xy=(x0, line_y), xytext=(0, 4),
@@ -543,8 +626,8 @@ def trade_table_text(
     would_enter/realized are the walk-forward's own precomputed decision (see
     run_walk_forward), passed straight through rather than recomputed here, so this text
     always matches exactly what the walk actually decided and realized. realized is
-    (realized_price, outcome) where outcome is 'take_profit' or 'expired' -- only
-    meaningful when would_enter is True."""
+    (realized_price, outcome) where outcome is 'stop_loss', 'take_profit', or 'expired' --
+    only meaningful when would_enter is True."""
     lines = [
         f"C1  O={ohlc[0,0]:.2f}  C={ohlc[0,3]:.2f}    "
         f"C2  O={ohlc[1,0]:.2f}  C={ohlc[1,3]:.2f}    "
@@ -559,6 +642,7 @@ def trade_table_text(
             realized_price, outcome = realized
             realized_return = (realized_price / buy_price - 1.0) * 100
             status = {
+                "stop_loss": "STOP LOSS -> filled at stop level",
                 "take_profit": "TAKE PROFIT -> filled at target",
                 "expired": "EXPIRED -> forced exit at real C3 close",
             }[outcome]
@@ -690,36 +774,60 @@ def make_plots(df: pd.DataFrame, pt_decisions: list[dict], cvae_decisions: list[
 
         true_horizon_ohlc = true_df.iloc[-HORIZON:][["open", "high", "low", "close"]].to_numpy()
 
-        sell_targets = [("CVAE TP", cvae_tp, "tab:green", "-")]
+        # Both models share one stop-loss level (see the module note above run_walk_forward
+        # -- it's calibrated to real market volatility, not either model's own predicted
+        # edge), so it's numerically identical whenever both are evaluated at the same
+        # window. Drawing it twice on the ground-truth panel would put two identical lines
+        # exactly on top of each other -- shown there just once, model-agnostic; each
+        # model's own panel still shows its own copy since there's no collision there.
+        stop_loss = buy_price * (1.0 - args.stop_loss_pct) if args.stop_loss_pct > 0 else None
+
+        cvae_sell_targets = [("CVAE TP", cvae_tp, "tab:green", "-")]
+        if stop_loss is not None:
+            cvae_sell_targets.append(("CVAE SL", stop_loss, "tab:red", "--"))
+
+        ground_truth_targets = [("CVAE TP", cvae_tp, "tab:green", "-")]
         if pt_d is not None:
             pt_tp = pt_d["take_profit"]
             pt_ohlc = reconstruct_prices(pt_d["price"], buy_price)  # (3,4)
             pt_df = true_df.copy()
             pt_df.loc[pt_df.index[-3:], ohlc_cols] = pt_ohlc
-            sell_targets.insert(0, ("PatchTST TP", pt_tp, "tab:orange", "-"))
+            pt_sell_targets = [("PatchTST TP", pt_tp, "tab:orange", "-")]
+            if stop_loss is not None:
+                pt_sell_targets.append(("PatchTST SL", stop_loss, "tab:red", ":"))
+            ground_truth_targets = [("PatchTST TP", pt_tp, "tab:orange", "-")] + ground_truth_targets
         else:
             pt_tp = pt_ohlc = None
             pt_df = true_df
+            pt_sell_targets = []
+        if stop_loss is not None:
+            ground_truth_targets.append(("Stop-loss (shared)", stop_loss, "tab:red", "--"))
 
         fig = plt.figure(figsize=(16, 8))
         outer = fig.add_gridspec(6, 2, width_ratios=[1, 1], hspace=0.7, wspace=0.25)
 
         render_panel(
             fig, outer[0:4, 0], outer[4:6, 0], true_df, buy_price, "Ground truth",
-            sell_targets=sell_targets,
+            sell_targets=ground_truth_targets,
         )
         render_panel(
             fig, outer[0:2, 1], outer[2, 1], pt_df, buy_price,
             "PatchTST generated" if pt_d is not None else "PatchTST (not evaluated this window)",
-            sell_targets=[("PatchTST TP", pt_tp, "tab:orange", "-")] if pt_d is not None else [],
+            sell_targets=pt_sell_targets,
             sell_limit=pt_tp, would_enter=(pt_d["would_trade"] if pt_d is not None else None),
-            realized=((pt_d["sell_price"], "take_profit" if pt_d["hit_take_profit"] else "expired") if pt_d is not None else None),
+            realized=(
+                (pt_d["sell_price"], trade_outcome_label(pt_d["hit_take_profit"], pt_d["hit_stop_loss"]))
+                if pt_d is not None else None
+            ),
         )
         render_panel(
             fig, outer[3:5, 1], outer[5, 1], cvae_df, buy_price, "CVAE generated (draw nearest target)",
-            sell_targets=[("CVAE TP", cvae_tp, "tab:green", "-")],
+            sell_targets=cvae_sell_targets,
             sell_limit=cvae_tp, would_enter=cvae_d["would_trade"],
-            realized=(cvae_d["sell_price"], "take_profit" if cvae_d["hit_take_profit"] else "expired"),
+            realized=(
+                cvae_d["sell_price"],
+                trade_outcome_label(cvae_d["hit_take_profit"], cvae_d["hit_stop_loss"]),
+            ),
         )
 
         fig.suptitle(f"CVAE case: {CASE_TITLES[case]}  |  ctx_bars={ctx_bars}, start_idx={start_idx}")
@@ -735,7 +843,7 @@ def make_plots(df: pd.DataFrame, pt_decisions: list[dict], cvae_decisions: list[
                     "sell_limit": None, "would_enter": False, "outcome": None,
                     "realized_price": None, "realized_return_pct": None,
                 }
-            outcome = "take_profit" if d["hit_take_profit"] else "expired"
+            outcome = trade_outcome_label(d["hit_take_profit"], d["hit_stop_loss"])
             return {
                 "candles": ohlc.tolist(),
                 "spread": spread(ohlc),
@@ -805,14 +913,21 @@ def main() -> None:
 
     logger.info(
         "running walk-forward backtest (ctx=%d bars, patchtst_min_return>=%.3f%%, "
-        "cvae_min_return>=%.3f%% [no CVAE quality gate -- see backlog.md], %d..%d)...",
+        "cvae_min_return>=%.3f%% [no CVAE quality gate -- see backlog.md], stop_loss=%.2f%% "
+        "[shared, see backlog.md], %d..%d)...",
         WALK_FORWARD_CTX_BARS, args.patchtst_min_return_threshold * 100,
-        args.cvae_min_return_threshold * 100, test_lo, test_hi,
+        args.cvae_min_return_threshold * 100, args.stop_loss_pct * 100, test_lo, test_hi,
     )
     pt_predict = make_patchtst_predict_fn(patchtst, device, sell_bound)
     cvae_predict = make_cvae_predict_fn(cvae, device, sell_bound, args.num_samples, args.cvae_sell_quantile)
-    pt_wf = run_walk_forward(pt_predict, feat, opens, closes, test_lo, test_hi, args.patchtst_min_return_threshold)
-    cvae_wf = run_walk_forward(cvae_predict, feat, opens, closes, test_lo, test_hi, args.cvae_min_return_threshold)
+    pt_wf = run_walk_forward(
+        pt_predict, feat, opens, closes, test_lo, test_hi,
+        args.patchtst_min_return_threshold, args.stop_loss_pct,
+    )
+    cvae_wf = run_walk_forward(
+        cvae_predict, feat, opens, closes, test_lo, test_hi,
+        args.cvae_min_return_threshold, args.stop_loss_pct,
+    )
     logger.info(
         "walk-forward: PatchTST %d trades / %d decisions, CVAE %d trades / %d decisions",
         len(pt_wf["trades"]), len(pt_wf["decisions"]), len(cvae_wf["trades"]), len(cvae_wf["decisions"]),
@@ -823,6 +938,7 @@ def main() -> None:
             "ctx_bars": WALK_FORWARD_CTX_BARS,
             "patchtst_min_return_threshold": args.patchtst_min_return_threshold,
             "cvae_min_return_threshold": args.cvae_min_return_threshold,
+            "stop_loss_pct": args.stop_loss_pct,
             "buy_and_hold": buy_and_hold_benchmark(df, wf_entry_idx, test_hi - 1),
             "naive_periodic": naive_periodic_benchmark(df, closes, wf_entry_idx, test_hi),
             "patchtst": walk_forward_stats(df, pt_wf),

@@ -3,6 +3,7 @@
     "ctx_bars": 70,
     "patchtst_min_return_threshold": 0.001,
     "cvae_min_return_threshold": 0.0002,
+    "stop_loss_pct": 0.02,
     "buy_and_hold": {
       "entry_date": "2024-01-16",
       "entry_price": 474.95,
@@ -29,22 +30,23 @@
       "n_decisions": 1477,
       "n_trades": 460,
       "outcome_breakdown": {
-        "win_take_profit": 0.12931618144888288,
+        "win_take_profit": 0.12863913337846988,
         "win_expiry": 0.06838185511171294,
-        "lose_expiry": 0.11374407582938388,
+        "lose_expiry": 0.11103588354773189,
+        "lose_stop_loss": 0.003385240352064997,
         "skipped": 0.6431956668923493,
         "no_trade": 0.04536222071767095
       },
-      "total_return": 0.07136230068922544,
-      "win_rate": 0.6347826086956522,
-      "take_profit_rate": 0.4152173913043478,
-      "avg_return": 0.000162727936454441,
+      "total_return": 0.09317787358613705,
+      "win_rate": 0.6326086956521739,
+      "take_profit_rate": 0.41304347826086957,
+      "avg_return": 0.00020387389348900772,
       "entry_date": "2024-01-17",
       "entry_price": 471.84,
       "exit_date": "2025-05-30",
       "exit_price": 585.8899993419648,
       "elapsed_years": 1.3665297741273101,
-      "annual_return": 0.05173626267152853
+      "annual_return": 0.06736559899342609
     },
     "cvae": {
       "n_decisions": 1030,
@@ -52,20 +54,21 @@
       "outcome_breakdown": {
         "win_take_profit": 0.5864077669902913,
         "win_expiry": 0.0,
-        "lose_expiry": 0.07766990291262135,
+        "lose_expiry": 0.07184466019417475,
+        "lose_stop_loss": 0.005825242718446602,
         "skipped": 0.19805825242718447,
         "no_trade": 0.1378640776699029
       },
-      "total_return": 0.039482459842944406,
+      "total_return": 0.06787700565479127,
       "win_rate": 0.8830409356725146,
       "take_profit_rate": 0.8830409356725146,
-      "avg_return": 6.530341232961455e-05,
+      "avg_return": 0.00010332659206427374,
       "entry_date": "2024-01-16",
       "entry_price": 474.95,
       "exit_date": "2025-05-30",
       "exit_price": 585.4144614804983,
       "elapsed_years": 1.36881131644992,
-      "annual_return": 0.02869342311236056
+      "annual_return": 0.04914737555526272
     }
   }
 }

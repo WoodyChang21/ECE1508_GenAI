@@ -69,16 +69,17 @@ def fmt_price_or_dash(price: float | None) -> str:
     return f"{price:.2f}" if price is not None else "—"
 
 
-OUTCOME_LABEL = {"take_profit": "TAKE PROFIT", "expired": "EXPIRED"}
+OUTCOME_LABEL = {"stop_loss": "STOP LOSS", "take_profit": "TAKE PROFIT", "expired": "EXPIRED"}
 
 # Mirrors src/evaluate.py's CASE_LABELS/CASE_TITLES -- kept as a local literal rather than
 # importing evaluate.py, since this script only ever reads the JSON it already wrote and
 # has no other dependency on torch/models.
-CASE_LABELS = ["win_take_profit", "win_expiry", "lose_expiry", "skipped", "no_trade"]
+CASE_LABELS = ["win_take_profit", "win_expiry", "lose_expiry", "lose_stop_loss", "skipped", "no_trade"]
 CASE_TITLES = {
     "win_take_profit": "Win — take-profit hit",
     "win_expiry": "Win — expiry (gain)",
     "lose_expiry": "Lose — expiry (loss)",
+    "lose_stop_loss": "Lose — stop-loss hit",
     "skipped": "Skipped (quality gate or return too small)",
     "no_trade": "No trade (target <= buy)",
 }
