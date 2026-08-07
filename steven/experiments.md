@@ -103,3 +103,49 @@ gives it a stable global scale instead).
 running on this variant as-is; the followup run (global volume normalization) is needed
 before concluding whether raw-price + volume is viable at all, or whether this specific
 uniform-RevIN treatment is just a bad fit for volume.
+
+## hf_patchtst_revin_ohlc_global_volume
+
+**What**: Follow-up to `hf_patchtst_revin_raw_price_with_volume` above, testing the
+hypothesis that RevIN's per-window normalization is a bad fit for volume specifically
+(bursty signal, noisy std estimate over only 70 samples). Same raw-price RevIN target, but
+volume excluded from RevIN and instead kept on `data_pipeline.py`'s existing global
+`log_volume_norm` scale (the same normalization every return-based notebook on this branch
+already uses for volume) -- OHLC still RevIN-normalized. Everything else identical
+(architecture, loss, hyperparameters, `channel_attention` sweep).
+Notebook: `steven/train_patchtst_hf_channel_attention.ipynb`.
+
+| Model | Windows | OHLC MAE/RMSE ($) | Volume MAE/RMSE | Dir Acc (bar 1/2/3) | Coherence |
+|---|---|---|---|---|---|
+| `channel_attention=False` | 2397 | 1.92 / 3.12 | 2.19M / 3.79M | 0.478 / 0.475 / 0.480 | 0.811 |
+| `channel_attention=True` | 2397 | 1.99 / 3.24 | 2.22M / 3.77M | 0.475 / 0.477 / 0.464 | 0.809 |
+
+**Conclusion: the hypothesis was wrong -- volume's normalization scheme is not the driver.**
+Directional accuracy is essentially unchanged from the uniform-RevIN run (0.46-0.48 either
+way, vs. 0.50 chance) despite volume now getting a stable global scale instead of RevIN's
+per-window one. Coherence actually dropped slightly (0.81 here vs. 0.88-0.94 uniform-RevIN)
+rather than improving. OHLC MAE/RMSE and volume MAE/RMSE both improved marginally, so the
+global-volume-scale change wasn't harmful -- it just isn't what's causing the below-chance
+directional accuracy.
+
+**Revised picture, comparing all three raw-price RevIN variants tried on this branch:**
+
+| Variant | Volume | Dir Acc range | 
+|---|---|---|
+| Original RevIN (this branch's earlier work, before this ladder) | dropped entirely | 0.528-0.552 (above chance) |
+| `hf_patchtst_revin_raw_price_with_volume` | RevIN (uniform) | 0.460-0.474 (below chance) |
+| `hf_patchtst_revin_ohlc_global_volume` | global log-standardize | 0.464-0.480 (below chance) |
+
+The pattern points at volume's mere **presence** as a joint prediction target, not its
+normalization method -- every raw-price RevIN variant with volume included lands
+below-chance, while the one without it was solidly above chance. Plausible mechanism: with
+a shared fused head projecting from all `N_CHANNELS` pooled representations at once, adding
+a 5th (volume) output competes with the 4 price outputs for the same limited head capacity
+and gradient budget, degrading price-direction learning specifically -- regardless of how
+volume itself is scaled going in.
+
+**Caveats**: one seed each; the "original RevIN, no volume" row is from earlier work on this
+branch (different point in the code's history, not literally the same notebook run) --
+worth a same-notebook rerun with volume dropped (this ladder's step 4) for a truly
+apples-to-apples confirmation before treating this conclusion as settled; below-chance
+directional accuracy on both volume variants means no backtest run on either.
