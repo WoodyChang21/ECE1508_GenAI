@@ -103,6 +103,11 @@ def main() -> None:
     device = resolve_device(cfg["device"])
     logger.info("device: %s", device)
 
+    # Window sampling below is already seeded (np.random.default_rng(cfg["seed"])), but without
+    # this, model init + DataLoader shuffling draw from torch's global RNG unseeded -- two runs
+    # of this same config produce different starting weights, not just different-looking noise.
+    torch.manual_seed(cfg["seed"])
+
     df, bounds, stats = build_dataset(cfg["data_path"])
     feat, opens, closes = extract_arrays(df)
 
