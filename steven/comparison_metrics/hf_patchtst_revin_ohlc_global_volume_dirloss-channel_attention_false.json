@@ -1,0 +1,27 @@
+{
+  "experiment": {
+    "name": "hf_patchtst_revin_ohlc_global_volume_dirloss",
+    "description": "Same as hf_patchtst_revin_ohlc_global_volume (RevIN OHLC + global log_volume_norm, volume included), plus an explicit directional loss term on top of the existing RevIN MSE -- tests whether that run's below-chance directional accuracy (a systematic wrong-sign bias, not just noise) can be corrected without dropping volume.",
+    "target": "raw_price_revin_ohlc_global_volume",
+    "include_volume": true,
+    "loss_weights": {
+      "note": "unweighted MSE + DIR_LOSS_WEIGHT * directional_loss, see intro markdown"
+    },
+    "dir_loss_weight": 0.1,
+    "dir_loss_scale": 1.0,
+    "channel_attention": false,
+    "seed": 0
+  },
+  "best_val_loss": 0.23992703219254813,
+  "n_windows": 2397,
+  "ohlc_mae": 1.8685661554336548,
+  "ohlc_rmse": 3.0982298851013184,
+  "volume_mae": 2196730.25,
+  "volume_rmse": 3774203.25,
+  "directional_accuracy": [
+    0.48226950354609927,
+    0.4789319983312474,
+    0.47017104714226116
+  ],
+  "coherence_rate": 0.720066750104297
+}
