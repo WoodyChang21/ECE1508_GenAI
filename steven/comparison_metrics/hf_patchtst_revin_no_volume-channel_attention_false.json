@@ -1,0 +1,23 @@
+{
+  "experiment": {
+    "name": "hf_patchtst_revin_no_volume",
+    "description": "HF PatchTSTModel + RevIN, raw OHLC target, volume dropped entirely (input + target). Step 4 of the experiment ladder -- same-notebook rerun of the earlier volume-free RevIN result, to confirm (with identical code/infra to step 3's two volume-included runs) that dropping volume restores above-chance directional accuracy.",
+    "target": "raw_price_revin_no_volume",
+    "include_volume": false,
+    "loss_weights": {
+      "note": "unweighted -- single RevIN-normalized MSE over the 4 OHLC channels"
+    },
+    "channel_attention": false,
+    "seed": 0
+  },
+  "best_val_loss": 0.1317015676498413,
+  "n_windows": 2397,
+  "ohlc_mae": 1.92252516746521,
+  "ohlc_rmse": 3.1102633476257324,
+  "directional_accuracy": [
+    0.5252398831873175,
+    0.5431789737171464,
+    0.54276178556529
+  ],
+  "coherence_rate": 0.9532749269920734
+}
