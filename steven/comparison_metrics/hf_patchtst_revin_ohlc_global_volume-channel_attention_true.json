@@ -1,0 +1,25 @@
+{
+  "experiment": {
+    "name": "hf_patchtst_revin_ohlc_global_volume",
+    "description": "HF PatchTSTModel + RevIN (OHLC only) + global log_volume_norm (volume), channel_attention swept. Step 3 of the experiment ladder -- isolates whether RevIN's earlier fix for the return-target collapse holds with volume back in, using a stable global scale for volume instead of RevIN's per-window one.",
+    "target": "raw_price_revin_ohlc_global_volume",
+    "include_volume": true,
+    "loss_weights": {
+      "note": "unweighted -- RevIN(OHLC) and global log_volume_norm are both ~unit-variance, see intro markdown"
+    },
+    "channel_attention": true,
+    "seed": 0
+  },
+  "best_val_loss": 0.1432861316204071,
+  "n_windows": 2397,
+  "ohlc_mae": 1.9863417148590088,
+  "ohlc_rmse": 3.238462209701538,
+  "volume_mae": 2217819.75,
+  "volume_rmse": 3768344.0,
+  "directional_accuracy": [
+    0.475177304964539,
+    0.47684605757196497,
+    0.46391322486441383
+  ],
+  "coherence_rate": 0.8085106382978723
+}
