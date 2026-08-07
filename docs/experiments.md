@@ -106,14 +106,100 @@ avoid confounding the architecture comparison), `lr=6e-4`/`weight_decay=1e-4`/
 
 ---
 
+## RevIN + raw-OHLC-price target (fixes shrinkage-to-zero collapse)
+
+Two intermediate variants were tried and discarded before this one, for
+context on why RevIN was needed:
+
+1. **True channel-independent head** (paper-faithful: same linear head
+   applied per-channel, no cross-channel mixing) regressed badly (OHLC
+   MAE/RMSE 8-11x worse, dir acc at/below chance) — reverted to the fused
+   head.
+2. **Fused head, volume dropped entirely, target still anchored log-returns**
+   (`open_ret`/`body_ret`/wicks) looked excellent on OHLC MAE/RMSE, but
+   training loss collapsed to a near-zero floor almost immediately, and the
+   long-only bracket-order backtest produced **zero trades at every
+   confidence threshold, for both `channel_attention` settings** —
+   `patchtst_confidence_scores` requires all 3 predicted horizon bars to
+   coherently agree on direction before a window is even eligible to trade,
+   and that condition never once held across 2397 test windows. Root cause:
+   for a near-random-walk hourly price series, the anchored log-return
+   target has near-zero mean/tiny variance, so MSE training finds
+   "predict ~0" a cheap shortcut that minimizes point error while
+   destroying directional signal.
+
+**Fix**: switch to a real RevIN implementation (Kim et al. 2021 — learnable
+per-channel `affine_weight`/`affine_bias`, not HF's built-in scaler, which
+has neither) normalizing/denormalizing raw OHLC prices directly, with the
+model predicting absolute price rather than a return decomposition. RevIN's
+zero point in normalized space is the context window's own trailing mean
+*price*, not "no future change," so collapsing to it is no longer a cheap
+shortcut. `PatchTSTOHLCVRevIN` in
+`steven/train_patchtst_revin_channel_attention_{True,False}.ipynb`, ported
+to `steven/src/models/patchtst_hf.py` as `PatchTSTHFRevIN` for
+`evaluate.py`. Predictions are converted back to the anchored log-return
+format via `ohlc_to_anchored_components()` (verified exact inverse of
+`reconstruct_prices`, round-trip error ~3e-16) so the rest of the
+metrics/backtest pipeline is unchanged.
+
+| Model | Commit | OHLC MAE / RMSE | Dir Acc (bar 1 / 2 / 3) | Coherence rate | std(pred)/std(true) |
+|---|---|---|---|---|---|
+| RevIN, `channel_attention=False` | [`a30bc1e`](https://github.com/WoodyChang21/ECE1508_GenAI/commit/a30bc1e) | **1.81 / 3.05** | 0.528 / 0.537 / 0.549 | **0.957** (2293/2397) | 1.003 |
+| RevIN, `channel_attention=True` | [`a30bc1e`](https://github.com/WoodyChang21/ECE1508_GenAI/commit/a30bc1e) | 1.90 / 3.11 | **0.535** / **0.540** / **0.552** | **0.980** (2350/2397) | 1.003 |
+
+Coherence rate = fraction of test windows where all 3 predicted horizon bars
+agree on direction — the metric that decisively distinguishes this result
+from the return-based collapse above (0/2397 → 95.7%/98.0%). `std(pred)/
+std(true) ≈ 1.0` for both confirms no flattening/shrinkage. These are also
+the best OHLC MAE/RMSE numbers anywhere on this branch.
+
+**Backtest** (long-only bracket-order, `steven/src/evaluate.py`, same
+methodology as the header note in `metrics_{false,true}_revin.json`; support
+added in [`b225a31`](https://github.com/WoodyChang21/ECE1508_GenAI/commit/b225a31), results pulled in [`286d53c`](https://github.com/WoodyChang21/ECE1508_GenAI/commit/286d53c)):
+
+| channel_attention | threshold | n_trades | win_rate | avg_return/trade | total_return |
+|---|---|---|---|---|---|
+| False | 0.5 | 1069 | 0.488 | -0.000078 | -0.0834 |
+| False | 0.6 | 855 | 0.502 | -0.000033 | -0.0286 |
+| False | **0.7** | 642 | 0.508 | **+0.000022** | **+0.0143** |
+| False | 0.8 | 428 | 0.526 | -0.000009 | -0.0037 |
+| False | 0.9 | 214 | 0.551 | -0.000286 | -0.0612 |
+| True | 0.5 | 1155 | 0.489 | -0.000144 | -0.1666 |
+| True | 0.6 | 924 | 0.485 | -0.000164 | -0.1513 |
+| True | 0.7 | 693 | 0.491 | -0.000133 | -0.0921 |
+| True | 0.8 | 462 | 0.500 | -0.000195 | -0.0901 |
+| True | 0.9 | 231 | 0.545 | -0.000061 | -0.0141 |
+
+- RevIN resolves the *structural* failure — both variants now actually place
+  trades at every threshold instead of zero — but neither produces a clear
+  trading edge. `False` at threshold 0.7 is the only cell across both
+  sweeps with positive `total_return` (642 trades, 50.8% win rate), and it's
+  a thin, roughly-breakeven edge (+0.000022/trade). `True` is net negative
+  at every threshold despite having the higher coherence rate and slightly
+  better OHLC/dir-acc numbers in training — coherence and OHLC accuracy
+  don't translate directly into backtest profitability here.
+- Per-horizon directional accuracy (0.53-0.55) is only marginally above
+  chance for both variants, consistent with the backtest being roughly
+  breakeven-to-slightly-negative rather than showing a real edge.
+- **Not yet done**: one seed only for both variants; no investigation into
+  why `True`'s better training-time metrics don't carry over to backtest
+  profitability; no threshold values between the tested 0.1 increments;
+  transaction costs/slippage not modeled.
+
+---
+
 ## Where this leaves the branch
 
 The HF `PatchTSTModel` replication clearly outperforms Steven's hand-rolled
 model at the same task/loss — the architecture change (true channel-independent
 patching + self-attention vs. early channel fusion) is the likely driver, not
-the loss function (which was already identical). Between `channel_attention`
-settings, `False` is the safer choice right now given `True`'s volume RMSE
-blowup, but `True`'s edge on OHLC/Dir Acc means this isn't fully settled.
-Next steps: investigate the `channel_attention=True` volume outliers, confirm
-both results hold across at least one more seed, then run the deferred
-backtest on whichever setting looks better.
+the loss function (which was already identical). The RevIN + raw-price
+reframing above is a separate, later change to the *target* (not just the
+architecture): it fixes a decisive failure mode (shrinkage-to-zero on
+return-based targets, confirmed via zero backtest trades) but has not yet
+produced a clearly profitable backtest — `channel_attention=False` at
+threshold 0.7 is the only marginally-positive result found so far. Next
+steps: investigate why `channel_attention=True` doesn't convert its better
+training metrics into backtest profit, confirm results across more than one
+seed, and consider whether a non-MSE loss or explicit trading-aware
+objective is needed to move past breakeven.
