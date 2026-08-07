@@ -39,6 +39,20 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def kl_beta_schedule(epoch: int, max_epochs: int, n_cycles: int, ramp_fraction: float) -> float:
+    """Cyclical KL annealing (Fu et al. 2019, "Cyclical Annealing Schedule") -- repeats a
+    0->1 linear ramp `n_cycles` times across training instead of ramping once and staying
+    at 1.0 forever after. Once a latent dimension collapses under a flat, maxed-out KL
+    penalty, the gradient encouraging the decoder to start using it again is very weak;
+    periodically relaxing the penalty back toward 0 gives the decoder repeated chances to
+    learn z is worth using before the penalty clamps back down. `ramp_fraction` of each
+    cycle ramps 0->1 linearly; the rest of the cycle holds at 1.0."""
+    cycle_len = max(1, max_epochs // n_cycles)
+    pos_in_cycle = epoch % cycle_len
+    ramp_len = max(1, int(cycle_len * ramp_fraction))
+    return min(1.0, (pos_in_cycle + 1) / ramp_len)
+
+
 def resolve_device(name: str) -> torch.device:
     if name == "auto":
         if torch.cuda.is_available():
@@ -138,11 +152,10 @@ def main() -> None:
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
     max_epochs = cfg["train"]["max_epochs"]
-    kl_anneal_epochs = max(1, cfg["loss"]["kl_anneal_epochs"])
 
     for epoch in range(max_epochs):
         t0 = time.time()
-        beta = min(1.0, (epoch + 1) / kl_anneal_epochs)
+        beta = kl_beta_schedule(epoch, max_epochs, cfg["loss"]["kl_cycles"], cfg["loss"]["kl_ramp_fraction"])
 
         train_rng = np.random.default_rng(cfg["seed"] + epoch)
         train_pairs = train_sampler.draw(cfg["train"]["train_windows_per_epoch"], train_rng)

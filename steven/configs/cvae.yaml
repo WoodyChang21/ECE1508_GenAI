@@ -5,14 +5,20 @@ data_path: steven/data/spy_ohlcv_1h.parquet
 model:
   hidden: 32
   ctx_dim: 64
-  z_dim: 16
+  z_dim: 8  # was 16 -- concentrate the KL budget into fewer, denser dims (see backlog.md)
   decoder_hidden: 128
+  ctx_dropout: 0.3  # new -- weakens the decoder's direct context bypass (see backlog.md)
 
 loss:
   w_price: 1.0
   w_vol: 0.5
-  kl_anneal_epochs: 5
-  free_bits: 0.05
+  # was a single 0->1 ramp over 5 epochs then flat at 1.0 for the rest -- cyclical
+  # annealing instead (Fu et al. 2019): 3 cycles across training, each ramping 0->1 over
+  # its first half then holding, so the decoder gets repeated chances to learn to use z
+  # instead of just one. See kl_beta_schedule in train_cvae.py.
+  kl_cycles: 3
+  kl_ramp_fraction: 0.5
+  free_bits: 0.15  # was 0.05 -- same idea as z_dim: force more real signal per dim, not more dims
 
 train:
   max_epochs: 30

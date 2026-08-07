@@ -50,6 +50,7 @@ class CVAEInpainting(nn.Module):
         ctx_dim: int = 64,
         z_dim: int = 16,
         decoder_hidden: int = 128,
+        ctx_dropout: float = 0.0,
     ):
         super().__init__()
         self.z_dim = z_dim
@@ -58,6 +59,13 @@ class CVAEInpainting(nn.Module):
 
         self.prior_head = nn.Linear(ctx_dim, 2 * z_dim)
         self.recognition_head = nn.Linear(ctx_dim, 2 * z_dim)
+
+        # Dropped only inside decode() (see below), never before prior_head -- the prior
+        # still sees the full, clean context; only the decoder's direct context bypass is
+        # weakened. Default 0.0 (identity) so old checkpoints saved without this param in
+        # their config (see evaluate.py, which reconstructs the model from a checkpoint's
+        # saved config dict) still load correctly.
+        self.ctx_dropout = nn.Dropout(ctx_dropout)
 
         self.decoder = nn.Sequential(
             nn.Linear(z_dim + ctx_dim, decoder_hidden),
@@ -84,6 +92,13 @@ class CVAEInpainting(nn.Module):
         return mu + eps * std
 
     def decode(self, z: torch.Tensor, ctx_repr: torch.Tensor):
+        """ctx_dropout is applied here, not before -- weakens the decoder's direct,
+        always-available context signal (a classic posterior-collapse driver: if the
+        decoder can already reconstruct well from context alone, there's no loss pressure
+        to ever route information through z) without touching the prior's own view of
+        context. Standard nn.Dropout -- a no-op whenever the model is in eval() mode, so
+        inference (sample(), always preceded by .eval() -- see evaluate.py) is unaffected."""
+        ctx_repr = self.ctx_dropout(ctx_repr)
         raw = self.decoder(torch.cat([z, ctx_repr], dim=-1))
         price_raw = raw[:, :12].reshape(-1, 3, 4)
         # Bounded to +-MAX_LOG_RETURN (open_ret/body_ret) or [0, MAX_LOG_RETURN] (wicks)
