@@ -1,0 +1,32 @@
+{
+  "experiment": {
+    "name": "hf_patchtst_revin_ohlc_global_volume_dirloss",
+    "description": "Weight sweep on hf_patchtst_revin_ohlc_global_volume_dirloss -- the first pass at DIR_LOSS_WEIGHT=0.1 was an essentially null result (directional accuracy unchanged within noise), most likely because the weight was too small to compete with the MSE term. This sweeps DIR_LOSS_WEIGHT over [0.5, 1.0, 3.0] x both channel_attention settings to find out whether a stronger weight moves the needle.",
+    "target": "raw_price_revin_ohlc_global_volume",
+    "include_volume": true,
+    "loss_weights": {
+      "note": "unweighted MSE + DIR_LOSS_WEIGHT * directional_loss, DIR_LOSS_WEIGHT swept this run"
+    },
+    "dir_loss_weights_swept": [
+      0.5,
+      1.0,
+      3.0
+    ],
+    "dir_loss_scale": 1.0,
+    "channel_attention": true,
+    "dir_loss_weight": 1.0,
+    "seed": 0
+  },
+  "best_val_loss": 1.2358676710128784,
+  "n_windows": 2397,
+  "ohlc_mae": 2.8504738807678223,
+  "ohlc_rmse": 4.049437522888184,
+  "volume_mae": 2286694.0,
+  "volume_rmse": 3930969.0,
+  "directional_accuracy": [
+    0.4622444722569879,
+    0.46057571964956195,
+    0.45431789737171463
+  ],
+  "coherence_rate": 0.9495202336253651
+}
