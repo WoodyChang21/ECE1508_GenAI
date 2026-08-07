@@ -149,3 +149,45 @@ branch (different point in the code's history, not literally the same notebook r
 worth a same-notebook rerun with volume dropped (this ladder's step 4) for a truly
 apples-to-apples confirmation before treating this conclusion as settled; below-chance
 directional accuracy on both volume variants means no backtest run on either.
+
+## hf_patchtst_revin_no_volume
+
+**What**: Step 4 of the ladder -- the same-notebook, same-infra confirmation the caveat
+above called for. Identical architecture/loss/hyperparameters to
+`hf_patchtst_revin_ohlc_global_volume`, volume removed entirely (not a context input, not
+a training target) -- `N_CHANNELS=4` (OHLC only), single `RevIN` over all four channels,
+no split logic needed.
+Notebook: `steven/train_patchtst_hf_channel_attention.ipynb`.
+
+| Model | Windows | OHLC MAE/RMSE ($) | Dir Acc (bar 1/2/3) | Coherence |
+|---|---|---|---|---|
+| `channel_attention=False` | 2397 | 1.92 / 3.11 | 0.525 / 0.543 / 0.543 | 0.953 |
+| `channel_attention=True` | 2397 | 2.15 / 3.30 | 0.529 / **0.544** / **0.549** | **0.987** |
+
+**Conclusion: hypothesis confirmed.** Dropping volume restores above-chance directional
+accuracy on every bar for both settings (0.525-0.549, vs. 0.46-0.48 with volume included
+either way it was normalized) -- and coherence is the highest seen on this branch
+(0.95-0.99, vs. 0.81-0.94 with volume, vs. 0/2397 for step 2's return-based collapse). OHLC
+MAE/RMSE is essentially unchanged from the volume-included RevIN runs (3.11-3.30 here vs.
+3.12-3.29 there) -- so volume's presence wasn't buying any price-accuracy benefit either,
+it was purely costing directional accuracy. This closes the loop from
+`hf_patchtst_revin_raw_price_with_volume`'s caveat: the mechanism really is volume
+competing with price for the shared fused head's capacity/gradient budget, not a
+normalization artifact.
+
+**This is the best result on the branch to date, on the metrics that matter for trading**:
+best coherence, above-chance directional accuracy on every bar, and OHLC RMSE competitive
+with (not meaningfully worse than) every other variant tried. `channel_attention=True`
+edges out `False` here on dir acc (bars 2-3) and coherence, at a small cost in OHLC RMSE
+(3.30 vs 3.11) -- similar to the split seen in `hf_patchtst_fused_head` (step 1), where
+`True` also traded a bit of point-error for slightly better directional/coherence numbers.
+
+**Implication for the ladder**: raw-price RevIN target + volume dropped is the strongest
+target/volume combination found so far -- first real candidate for an actual backtest
+(deferred on every other variant due to at/below-chance directional accuracy). Step 5
+(head comparison) should build on this combination rather than the anchored-return one.
+
+**Caveats**: one seed each; still no backtest run (this notebook family computes forecasting
+metrics only, backtest wiring deferred until a combination is picked -- this result is the
+strongest case yet for actually doing that wiring); `channel_attention=True` vs `False` here
+is a smaller, closer call than the volume question was, not yet a settled pick.
