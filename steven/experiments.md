@@ -191,3 +191,46 @@ target/volume combination found so far -- first real candidate for an actual bac
 metrics only, backtest wiring deferred until a combination is picked -- this result is the
 strongest case yet for actually doing that wiring); `channel_attention=True` vs `False` here
 is a smaller, closer call than the volume question was, not yet a settled pick.
+
+## hf_patchtst_revin_ohlc_global_volume_dirloss
+
+**What**: Tests whether an explicit directional loss term can correct
+`hf_patchtst_revin_ohlc_global_volume`'s below-chance directional accuracy without having
+to drop volume. Identical code/architecture/data to that run (checked out from its exact
+commit, `f1ad007`), with one addition: `loss = mse + DIR_LOSS_WEIGHT * dir_loss`, where
+`dir_loss = -log(sigmoid(DIR_LOSS_SCALE * pred_ret * true_ret))` and `pred_ret`/`true_ret`
+are the predicted/true close-price change relative to `close_0` -- the same anchor
+`directional_accuracy` is measured against. `DIR_LOSS_WEIGHT=0.1`, `DIR_LOSS_SCALE=1.0`
+(untuned defaults, not swept).
+Notebook: `steven/train_patchtst_hf_channel_attention.ipynb`.
+
+| Model | Windows | OHLC MAE/RMSE ($) | Dir Acc (bar 1/2/3) | Coherence |
+|---|---|---|---|---|
+| `channel_attention=False` | 2397 | 1.87 / 3.10 | 0.482 / 0.479 / 0.470 | 0.720 |
+| `channel_attention=True` | 2397 | 1.97 / 3.25 | 0.467 / 0.475 / 0.468 | 0.812 |
+
+**Conclusion: essentially a null result at these hyperparameter values -- do not read this
+as "directional loss doesn't work," read it as "this weight/scale didn't move the needle."**
+Directional accuracy is unchanged within noise from the no-directional-loss run (0.467-0.482
+here vs. 0.464-0.480 there, both still solidly below chance). OHLC RMSE is essentially
+identical too (3.10-3.25 vs. 3.12-3.24). The one real change is `channel_attention=False`'s
+coherence, which *dropped* (0.720 vs. 0.811) -- the directional term perturbed training
+somewhere without fixing the thing it was meant to fix.
+
+**Most likely explanation: `DIR_LOSS_WEIGHT=0.1` is too small to meaningfully compete with
+the MSE term**, which given this branch's own numbers (`vol_loss` alone was ~0.18-0.27 in
+step 1's unrelated but comparably-scaled MSE runs) is plausibly still the dominant term in
+the combined loss at a 10x-smaller weight. This isn't evidence the mechanism is wrong, just
+that this first, untuned pass didn't apply enough pressure to change what the model
+optimizes toward.
+
+**Recommended next step, not yet done**: sweep `DIR_LOSS_WEIGHT` upward (e.g. 0.5, 1.0, 3.0)
+before concluding whether a directional loss can work here -- this run only rules out 0.1,
+not the approach itself. If a higher weight still doesn't move directional accuracy while
+visibly degrading OHLC RMSE, that would be stronger evidence the volume-competition
+mechanism isn't fixable by reweighting the loss and `hf_patchtst_revin_no_volume` (no
+directional loss needed) remains the better path forward.
+
+**Caveats**: one seed each; `DIR_LOSS_SCALE=1.0` also untuned and not isolated from
+`DIR_LOSS_WEIGHT` in this single run -- a 2D sweep (not just weight) may be needed; no
+backtest run (still below-chance direction).
