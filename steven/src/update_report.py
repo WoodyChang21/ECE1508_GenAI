@@ -1,11 +1,12 @@
 """Regenerate the data-driven tables/images in v1.md from the latest evaluate.py run.
 
 Reads steven/outputs/metrics.json + steven/outputs/sample_plots/samples.json (both written
-by evaluate.py) and replaces 5 marker-delimited regions in v1.md -- the Results section's
-per-sample subsections plus its two summary tables, and the Long-only backtest results'
-two threshold tables. Everything else in v1.md (prose, headings, caveats) is left
-untouched. Run this after every evaluate.py run so the doc's tables/images always match
-the latest checkpoints instead of a stale hand-transcribed run.
+by evaluate.py) and replaces 6 marker-delimited regions in v1.md -- the Results section's
+per-sample subsections plus its two summary tables, the population-level outcome-breakdown
+table, and the Long-only backtest results' two threshold tables. Everything else in v1.md
+(prose, headings, caveats) is left untouched. Run this after every evaluate.py run so the
+doc's tables/images always match the latest checkpoints instead of a stale hand-transcribed
+run.
 
 Usage:
     python steven/src/update_report.py
@@ -64,6 +65,17 @@ def candle_oc(candle: list[float]) -> str:
 
 OUTCOME_LABEL = {"take_profit": "TAKE PROFIT", "expired": "EXPIRED"}
 
+# Mirrors src/evaluate.py's CASE_LABELS/CASE_TITLES -- kept as a local literal rather than
+# importing evaluate.py, since this script only ever reads the JSON it already wrote and
+# has no other dependency on torch/models.
+CASE_LABELS = ["win_take_profit", "win_expiry", "no_trade", "lose_expiry"]
+CASE_TITLES = {
+    "win_take_profit": "Win — take-profit hit",
+    "win_expiry": "Win — expiry (gain)",
+    "no_trade": "No trade (target <= buy)",
+    "lose_expiry": "Lose — expiry (loss)",
+}
+
 
 def vs_real_cell(model: dict) -> str:
     """No trade was entered, so there's no take-profit order to have resolved."""
@@ -90,10 +102,10 @@ def sample_section(s: dict) -> str:
     gt, pt, cvae = s["ground_truth"], s["patchtst"], s["cvae"]
     buy = s["buy_price"]
     return "\n".join([
-        f"### Sample {s['index']} — {s['bucket']} context (`ctx_bars={s['ctx_bars']}`, "
+        f"### {CASE_TITLES[s['case']]} — {s['ctx_bucket']} context (`ctx_bars={s['ctx_bars']}`, "
         f"`start_idx={s['start_idx']}`)",
         "",
-        f"![sample{s['index']}](outputs/sample_plots/{s['file']})",
+        f"![{s['case']}_{s['ctx_bucket']}](outputs/sample_plots/{s['file']})",
         "",
         "| | Candle 1 (open / close) | Candle 2 (open / close) | Candle 3 (open / close) | "
         "Buy price | Take-profit | Trade? | vs. real price |",
@@ -124,18 +136,33 @@ def hit_status(model: dict) -> str:
 
 
 def hit_summary_block(samples: list[dict]) -> str:
-    lines = ["| Sample | PatchTST | CVAE |", "|---|---|---|"]
+    lines = ["| Case | Context | PatchTST | CVAE |", "|---|---|---|---|"]
     for s in samples:
-        lines.append(f"| {s['index']} | {hit_status(s['patchtst'])} | {hit_status(s['cvae'])} |")
+        lines.append(
+            f"| {CASE_TITLES[s['case']]} | {s['ctx_bucket']} | "
+            f"{hit_status(s['patchtst'])} | {hit_status(s['cvae'])} |"
+        )
     return "\n".join(lines)
 
 
 def spread_summary_block(samples: list[dict]) -> str:
-    lines = ["| Sample | Ground truth (actual) | PatchTST | CVAE |", "|---|---|---|---|"]
+    lines = ["| Case | Context | Ground truth (actual) | PatchTST | CVAE |", "|---|---|---|---|---|"]
     for s in samples:
         lines.append(
-            f"| {s['index']} | {s['ground_truth']['spread']:.2f} | {s['patchtst']['spread']:.2f} | "
-            f"{s['cvae']['spread']:.2f} |"
+            f"| {CASE_TITLES[s['case']]} | {s['ctx_bucket']} | {s['ground_truth']['spread']:.2f} | "
+            f"{s['patchtst']['spread']:.2f} | {s['cvae']['spread']:.2f} |"
+        )
+    return "\n".join(lines)
+
+
+def outcome_breakdown_table(pt_breakdown: dict, cvae_breakdown: dict) -> str:
+    """Population-level breakdown (independent of confidence threshold) -- see
+    src/evaluate.py's outcome_breakdown. Rows sum to 100% per column."""
+    lines = ["| Case | PatchTST | CVAE |", "|---|---|---|"]
+    for case in CASE_LABELS:
+        lines.append(
+            f"| {CASE_TITLES[case]} | {fmt_plain_pct(pt_breakdown[case], 1)} | "
+            f"{fmt_plain_pct(cvae_breakdown[case], 1)} |"
         )
     return "\n".join(lines)
 
@@ -190,6 +217,10 @@ def main() -> None:
         "results-samples": results_samples_block(samples),
         "hit-summary": hit_summary_block(samples),
         "spread-summary": spread_summary_block(samples),
+        "outcome-breakdown": outcome_breakdown_table(
+            metrics["overall"]["backtest"]["patchtst_outcome_breakdown"],
+            metrics["overall"]["backtest"]["cvae_outcome_breakdown"],
+        ),
         "backtest-patchtst": backtest_table(metrics["overall"]["backtest"]["patchtst"]),
         "backtest-cvae": backtest_table(metrics["overall"]["backtest"]["cvae"]),
         "buy-hold-benchmark": buy_hold_block(metrics["overall"]["backtest"]["buy_and_hold"]),

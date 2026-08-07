@@ -154,3 +154,48 @@ def test_sweep_thresholds_reports_take_profit_rate():
     rows = ev.sweep_thresholds(confidence, trade_return, [0.5], hit_tp)
 
     assert rows[0]["take_profit_rate"] == pytest.approx(0.25)
+
+
+def test_classify_outcomes_all_four_cases():
+    # window0: eligible, hit -> win_take_profit
+    # window1: eligible, missed, positive return -> win_expiry
+    # window2: not eligible -> no_trade (regardless of hit/return, which shouldn't matter)
+    # window3: eligible, missed, non-positive return -> lose_expiry (boundary: exactly 0)
+    eligible = np.array([True, True, False, True])
+    hit_tp = np.array([True, False, True, False])
+    trade_return = np.array([0.05, 0.01, 0.05, 0.0])
+
+    labels = ev.classify_outcomes(eligible, hit_tp, trade_return)
+
+    np.testing.assert_array_equal(
+        labels, ["win_take_profit", "win_expiry", "no_trade", "lose_expiry"]
+    )
+
+
+def test_outcome_breakdown_fractions_and_empty():
+    labels = np.array(["win_take_profit", "win_expiry", "no_trade", "lose_expiry", "no_trade"])
+    breakdown = ev.outcome_breakdown(labels)
+
+    assert breakdown["win_take_profit"] == pytest.approx(0.2)
+    assert breakdown["win_expiry"] == pytest.approx(0.2)
+    assert breakdown["no_trade"] == pytest.approx(0.4)
+    assert breakdown["lose_expiry"] == pytest.approx(0.2)
+    assert sum(breakdown.values()) == pytest.approx(1.0)
+
+    assert ev.outcome_breakdown(np.array([])) == {}
+
+
+def test_model_trade_outcomes_matches_take_profit_exit_and_classify():
+    true_ohlc = np.array([
+        [_bar(101, 106, 100, 104), _bar(100, 101, 99, 100), _bar(100, 101, 99, 100)],  # hit
+        [_bar(100, 102, 98, 101), _bar(101, 103, 99, 102), _bar(102, 104, 100, 103)],  # miss, close=103
+    ])
+    take_profit = np.array([105.0, 90.0])  # row1's target (90) never clears close_0 (100)
+    close_0 = np.array([100.0, 100.0])
+
+    out = ev.model_trade_outcomes(true_ohlc, take_profit, close_0)
+
+    np.testing.assert_allclose(out["sell_price"], [105.0, 103.0])
+    np.testing.assert_array_equal(out["hit_take_profit"], [True, False])
+    np.testing.assert_array_equal(out["eligible"], [True, False])
+    np.testing.assert_array_equal(out["label"], ["win_take_profit", "no_trade"])
