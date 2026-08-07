@@ -1,0 +1,23 @@
+{
+  "experiment": {
+    "name": "hf_patchtst_fused_head",
+    "description": "HF PatchTST model with channel_attention toggled. Same head as Steven's -- parity check before trying volume/target variants.",
+    "target": "anchored_log_return",
+    "include_volume": true,
+    "loss_weights": {
+      "price": 1.0,
+      "vol": 0.5
+    },
+    "channel_attention": true,
+    "seed": 0
+  },
+  "best_val_loss": 0.08883094090223312,
+  "n_windows": 2397,
+  "ohlc_rmse": 4.8368052030041735,
+  "volume_rmse": 4007730.75,
+  "directional_accuracy": [
+    0.5298289528577388,
+    0.5406758448060075,
+    0.5452649144764289
+  ]
+}
