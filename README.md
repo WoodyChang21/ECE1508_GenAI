@@ -270,6 +270,35 @@ python scripts/models/train_mamba.py --lookbacks 24 --epochs 1 \
 
 The full default search is intended for a GPU. Hugging Face Transformers provides a slower sequential Mamba fallback when optimized kernels are unavailable, so CPU execution remains supported but can take substantially longer.
 
+### Evaluate a saved Colab checkpoint
+
+Save a self-contained checkpoint during training:
+
+```bash
+python scripts/models/train_mamba.py \
+  --checkpoint data/checkpoints/mamba.pt
+```
+
+After downloading that checkpoint from Colab, evaluate it locally against the held-out test split without retraining:
+
+```bash
+python scripts/models/evaluate_mamba.py \
+  --checkpoint data/checkpoints/mamba.pt \
+  --transaction-cost-bps 1
+```
+
+If the Colab run used the default training command and did not save a checkpoint, download its automatically generated `data/predictions/mamba_preds.parquet` instead:
+
+```bash
+python scripts/models/evaluate_mamba.py \
+  --predictions data/predictions/mamba_preds.parquet \
+  --transaction-cost-bps 1
+```
+
+Both modes write a full report to `data/predictions/mamba_eval.json`; checkpoint mode also writes fresh per-row forecasts to `data/predictions/mamba_eval.parquet`. The report includes point-forecast accuracy, zero/mean/lag-one forecast baselines, validation-calibrated interval coverage, and a chronological confidence-threshold strategy sweep with always-long and lag-one strategy baselines. Transaction cost is a one-way cost on position turnover; use `0` for a frictionless diagnostic and a realistic nonzero value for performance assessment.
+
+The evaluator checks the saved feature order, model settings, scaler, and lookback. The current checkpoint format does not store hashes of the data files, so use the same `val.parquet` and `test.parquet` versions that were present in Colab.
+
 ### Run tests
 
 ```bash

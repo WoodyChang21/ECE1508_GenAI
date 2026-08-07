@@ -25,7 +25,11 @@ def fetch_hourly(symbol: str, start: str, end: str, api_key: str) -> list[dict]:
             "apikey": api_key,
         }
         resp = requests.get(url, params=params, timeout=30)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError as e:
+            safe = resp.url.replace(api_key, "***")
+            raise requests.HTTPError(f"{resp.status_code} for {safe}") from e
         chunk = resp.json()
         if not isinstance(chunk, list):
             raise ValueError(
