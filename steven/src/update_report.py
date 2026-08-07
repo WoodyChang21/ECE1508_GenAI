@@ -79,7 +79,7 @@ CASE_TITLES = {
     "win_take_profit": "Win — take-profit hit",
     "win_expiry": "Win — expiry (gain)",
     "lose_expiry": "Lose — expiry (loss)",
-    "skipped": "Skipped (low confidence or return too small)",
+    "skipped": "Skipped (quality gate or return too small)",
     "no_trade": "No trade (target <= buy)",
 }
 

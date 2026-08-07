@@ -183,38 +183,13 @@ def test_naive_periodic_benchmark_no_room_for_a_trade():
     assert result["total_return"] == 0.0
 
 
-def test_patchtst_walk_forward_confidence_online_reference():
-    close_0 = np.array([100.0])
-    coherent_up = np.array([_components(0.02, 0.0)] * 3)[None]
-    incoherent = np.array([_components(0.02, 0.0), _components(0.01, -0.03), _components(0.02, 0.0)])[None]
-
-    # Very first coherent-up call ever: nothing to rank against yet -> neutral 0.5, not 0.0
-    # (0.0 would silently gate out every early trading opportunity -- see the historical bug
-    # this replaced, where percentile_rank of a length<=1 array was hardcoded to 0).
-    reference: list[float] = []
-    assert ev.patchtst_walk_forward_confidence(coherent_up, close_0, reference) == 0.5
-    # open_ret=body_ret combine via exp() (log-return reconstruction), not linearly -- see
-    # reconstruct_prices -- so the stored magnitude is exp(0.02)-1, not exactly 0.02.
-    assert reference == [pytest.approx(np.exp(0.02) - 1.0)]
-
-    # Second coherent-up call with a bigger predicted move now has one prior value (0.02) to
-    # beat -> ranks above it -> 1.0. The reference list grows in place (online/expanding).
-    bigger_up = np.array([_components(0.05, 0.0)] * 3)[None]
-    assert ev.patchtst_walk_forward_confidence(bigger_up, close_0, reference) == 1.0
-    assert len(reference) == 2
-
-    # Incoherent (bars disagree on direction) is auto-dismissed regardless of the
-    # reference, and does NOT get appended to it.
-    assert ev.patchtst_walk_forward_confidence(incoherent, close_0, reference) == 0.0
-    assert len(reference) == 2
-
-
-def _fake_predict_fn(take_profit: float, confidence: float):
+def _fake_predict_fn(take_profit: float, passes_quality_gate: bool):
     """A stand-in for make_patchtst_predict_fn/make_cvae_predict_fn's returned closure --
-    same {take_profit, confidence, price} contract, constant regardless of the window."""
+    same {take_profit, passes_quality_gate, price} contract, constant regardless of the
+    window."""
 
     def predict(w):
-        return {"take_profit": take_profit, "confidence": confidence, "price": np.zeros((3, 4))}
+        return {"take_profit": take_profit, "passes_quality_gate": passes_quality_gate, "price": np.zeros((3, 4))}
 
     return predict
 
@@ -222,30 +197,24 @@ def _fake_predict_fn(take_profit: float, confidence: float):
 def test_run_walk_forward_no_trade_advances_one_bar_trade_advances_horizon():
     """A predict_fn that never clears eligibility should visit every start_idx from
     test_lo up to the last valid one (step 1 each time); one that's always eligible,
-    confident, and above the min-return threshold should instead jump by HORIZON each
-    time."""
+    passes its quality gate, and is above the min-return threshold should instead jump by
+    HORIZON each time."""
     feat = np.zeros((200, 7), dtype=np.float32)
     opens = np.full(200, 100.0)
     closes = np.full(200, 100.0)
     test_lo, test_hi = 0, 200
     last_valid_start = test_hi - ev.WALK_FORWARD_CTX_BARS - ev.HORIZON
 
-    never_eligible = _fake_predict_fn(take_profit=50.0, confidence=1.0)  # < close_0 (100)
-    result = ev.run_walk_forward(
-        never_eligible, feat, opens, closes, test_lo, test_hi,
-        confidence_threshold=0.5, min_return_threshold=0.0,
-    )
+    never_eligible = _fake_predict_fn(take_profit=50.0, passes_quality_gate=True)  # < close_0 (100)
+    result = ev.run_walk_forward(never_eligible, feat, opens, closes, test_lo, test_hi, min_return_threshold=0.0)
     visited = [d["start_idx"] for d in result["decisions"]]
     assert visited == list(range(test_lo, last_valid_start + 1))
     assert result["trades"] == []
     assert all(d["label"] == "no_trade" for d in result["decisions"])
     assert result["equity_final"] == 1.0
 
-    always_trade = _fake_predict_fn(take_profit=150.0, confidence=1.0)  # > close_0 (100)
-    result_2 = ev.run_walk_forward(
-        always_trade, feat, opens, closes, test_lo, test_hi,
-        confidence_threshold=0.5, min_return_threshold=0.0,
-    )
+    always_trade = _fake_predict_fn(take_profit=150.0, passes_quality_gate=True)  # > close_0 (100)
+    result_2 = ev.run_walk_forward(always_trade, feat, opens, closes, test_lo, test_hi, min_return_threshold=0.0)
     visited_2 = [d["start_idx"] for d in result_2["decisions"]]
     assert visited_2 == list(range(test_lo, last_valid_start + 1, ev.HORIZON))
     assert len(result_2["trades"]) == len(visited_2)
@@ -254,17 +223,31 @@ def test_run_walk_forward_no_trade_advances_one_bar_trade_advances_horizon():
 def test_run_walk_forward_min_return_threshold_gates_eligible_windows():
     """Eligible (target > buy) but the predicted edge is smaller than min_return_threshold
     -> 'skipped', never traded, and the walk advances 1 bar at a time just like a
-    confidence-driven skip would."""
+    quality-gate-driven skip would."""
     feat = np.zeros((120, 7), dtype=np.float32)
     opens = np.full(120, 100.0)
     closes = np.full(120, 100.0)
     test_lo, test_hi = 0, 120
 
-    tiny_edge = _fake_predict_fn(take_profit=100.05, confidence=1.0)  # +0.05% predicted edge
+    tiny_edge = _fake_predict_fn(take_profit=100.05, passes_quality_gate=True)  # +0.05% predicted edge
     result = ev.run_walk_forward(
-        tiny_edge, feat, opens, closes, test_lo, test_hi,
-        confidence_threshold=0.5, min_return_threshold=0.001,  # require >= 0.1%
+        tiny_edge, feat, opens, closes, test_lo, test_hi, min_return_threshold=0.001,  # require >= 0.1%
     )
+    assert result["trades"] == []
+    assert all(d["label"] == "skipped" for d in result["decisions"])
+
+
+def test_run_walk_forward_quality_gate_alone_can_skip_a_large_edge():
+    """Eligible AND well above the return threshold, but passes_quality_gate=False (e.g.
+    PatchTST's 3 bars disagree on direction, or CVAE's sample consensus doesn't clear its
+    threshold) -> still 'skipped', not traded -- the two gates are independent."""
+    feat = np.zeros((120, 7), dtype=np.float32)
+    opens = np.full(120, 100.0)
+    closes = np.full(120, 100.0)
+    test_lo, test_hi = 0, 120
+
+    big_edge_bad_gate = _fake_predict_fn(take_profit=150.0, passes_quality_gate=False)
+    result = ev.run_walk_forward(big_edge_bad_gate, feat, opens, closes, test_lo, test_hi, min_return_threshold=0.001)
     assert result["trades"] == []
     assert all(d["label"] == "skipped" for d in result["decisions"])
 

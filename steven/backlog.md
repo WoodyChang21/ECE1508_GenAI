@@ -19,7 +19,7 @@ improvement," since predicted highs run above predicted closes but real wicks ma
 the model's guess either. Deliberately held off this pass since PatchTST is meant to stay a simple
 benchmark, not necessarily mirror CVAE's approach.
 
-## CVAE posterior collapse (KL pinned at the free-bits floor) -- fix attempted, needs a retrain to verify
+## CVAE posterior collapse (KL pinned at the free-bits floor) -- fix attempted, mixed evidence
 
 CVAE's reported KL loss used to settle to exactly `z_dim * free_bits` (0.8 = 16 * 0.05) and stay there for
 the rest of training, on every run so far (see `v1.md`'s "A training diagnostic" note under Loss) — every
@@ -71,19 +71,61 @@ checkpoint" event landed on exactly the first epoch of a cycle (epoch 1, 11, 21 
 reset), never anywhere else. The checkpoint that got kept was essentially an arbitrary early snapshot, not
 the best-trained one. Fixed by selecting on reconstruction loss alone (`recon_loss`, unweighted by beta,
 now logged every epoch as `train_recon`/`val_recon`) instead of the raw total -- `losses.py`'s `cvae_loss`
-now also returns `recon_loss` in its parts dict for this purpose. **The KL numbers above are from *before*
-this fix**, so they should be treated as provisional -- worth retraining again with the corrected
-selection criterion before drawing a final conclusion either way.
+now also returns `recon_loss` in its parts dict for this purpose.
 
-## "Trade confidence" redesign (alias: **trade confidence**) -- gated on the posterior-collapse retrain above
+**Second retrain, with the checkpoint-selection fix actually in effect (2026-08-07)**: `val_recon` fell
+from `0.20` (epoch 1) to `0.069` (epoch 28, the checkpoint actually kept) -- a genuine, mostly-monotonic
+~65% reduction held across all three beta cycles, so this is a real, well-converged model, not an
+artifact. KL itself still tells the same marginal story as the first retrain: `1.2000-1.2029` in most
+hold-phases, brief spikes to `1.2052-1.2123` right after each reset -- roughly 0.2-1% above the new floor,
+same relative magnitude as before. On the KL number alone, still reads as "substantially collapsed."
 
-**Contingent on the CVAE posterior-collapse fix directly above.** Only worth pursuing once that retrain
-confirms the reported KL actually settles above the new floor (`8 × 0.15 = 1.2`) instead of pinned exactly
-at it. If collapse persists, CVAE's sample-agreement gate (see below) will still fire true on nearly every
-decision no matter what threshold is picked, and this redesign wouldn't fix that on its own -- it isn't a
-substitute for the model fix, it's the next thing to reconsider once the model fix is validated.
+**But the walk-forward backtest tells a more encouraging story than the KL number does.** Direct
+inspection of this checkpoint's confidence/edge-size distributions (not just the aggregate walk-forward
+outcome) found:
+- CVAE's sample-consensus fraction now spans a real range -- 5th/25th/50th/75th/95th percentiles
+  `0.2 / 0.4 / 0.6 / 0.8 / 1.0`, with 67.7% clearing 0.5. Before this fix, this was pinned near 1.0
+  almost everywhere (consistent with the ~99.6% trade rate the old checkpoint produced). This is real,
+  qualitatively different behavior, and it's evidence the fix accomplished something meaningful even
+  though the KL number barely moved relative to its (higher) floor.
+- CVAE's predicted edge sizes shrank dramatically in the same run -- among eligible decisions, predicted
+  return ran `0.006% / 0.023% / 0.038% / 0.052% / 0.072%` (5th-95th percentile), entirely below the old
+  shared `min_return_threshold=0.1%`. That threshold was tuned against the old (collapsed) checkpoint's
+  edge scale and, combined with the new checkpoint's much smaller edges, was silently filtering out
+  100% of CVAE's trades regardless of confidence -- not a sign the model broke, but a sign the fixed
+  absolute threshold no longer matched CVAE's shifted output scale. See the "trade confidence" entry
+  below for the fix (per-model thresholds).
 
-**The problem being addressed**: today's walk-forward backtest gates each trade on two things --
+Net read: the fix most likely *did* increase genuine sample diversity (the confidence-spread evidence is
+fairly direct), but the KL metric itself is a weak/noisy read on that in this case -- the practical,
+walk-forward-level signal (confidence distribution, trade selectivity) turned out to be more informative
+than staring at the aggregate KL number. Not fully validated as "collapse solved," but no longer reads as
+"the fix clearly did nothing" either. If a future retrain still shows CVAE's confidence pinned near 1.0
+(not the spread seen here), that's the point to escalate to the architectural lever from the root-cause
+paragraph above.
+
+## "Trade confidence" redesign (alias: **trade confidence**) -- implemented (2026-08-07)
+
+**Was contingent on the CVAE posterior-collapse fix above; proceeded once the walk-forward evidence (not
+the KL number itself) showed CVAE's sample consensus had genuinely gained real spread** (see the
+posterior-collapse entry above) -- confirming the underlying signal was worth preserving as its own gate
+rather than something to drop.
+
+**Implementing this surfaced a second, unrelated-to-collapse bug**: the shared `min_return_threshold=0.1%`
+(same absolute value for both models) had been tuned against the old, collapsed CVAE checkpoint's edge
+scale. The new checkpoint's predicted edges shrank to `0.006%-0.072%` (5th-95th percentile) -- entirely
+below that threshold -- so CVAE was trading on exactly 0 of 2397 decisions even though its confidence
+signal looked healthy. PatchTST's edges, by contrast, run `0.046%-0.51%` -- roughly 7x larger. A single
+shared absolute threshold was never going to fit two models with different (and apparently driftable)
+output scales. Fixed by giving each model its own `--patchtst-min-return-threshold` (kept at 0.001) and
+`--cvae-min-return-threshold` (new default 0.0002, chosen near CVAE's own 25th percentile on this
+checkpoint -- re-check after any retrain that might shift the scale again). With both fixes together
+(quality-gate redesign below + per-model return thresholds), the same checkpoint went from 0 trades to a
+sane, non-degenerate 663/1072 (61.8%, 86.7% win rate, 86.4% take-profit rate) -- PatchTST similarly moved
+to 460/1477 (31.1%, 63.5% win rate), since dropping its old online-ranking gate (see below) also made it
+noticeably more permissive than before.
+
+**The problem being addressed**: the walk-forward backtest used to gate each trade on two things --
 `predicted_return >= min_return_threshold` (mechanical, same formula for both models), and a "confidence"
 score that is defined completely differently per model and squeezed onto the same 0-1 scale as if they
 were comparable (PatchTST: a rank of predicted-move magnitude against an online, expanding history of its
@@ -91,23 +133,23 @@ own prior decisions; CVAE: fraction of its *k* sampled draws that agree on an up
 one model isn't really the same kind of number as a "0.7" from the other, and PatchTST's version is also
 noisier early in each walk (thin/empty reference to rank against).
 
-**Proposed replacement**: drop the shared "confidence" concept entirely. Keep the mechanical return-size
-gate as-is (shared formula, both models), and replace the fuzzy shared score with two separately-named,
-separately-thresholded "quality gates," one per model, with no claim that they're comparable to each
-other:
-- **PatchTST**: a plain boolean -- do all 3 predicted horizon bars agree on the "up" direction? No score,
-  no threshold, no dependence on walk history. This *deletes* the current online-ranking mechanism
-  (`patchtst_walk_forward_confidence` and its mutable, growing reference list) entirely -- a real
-  simplification of the code independent of anything about CVAE, and it removes the "noisier early in the
-  walk" asymmetry between the two models' gates.
-- **CVAE**: keep the existing sample-consensus fraction (`cvae_confidence_scores`, unchanged), thresholded
-  by its own dedicated knob (e.g. `--cvae-consensus-threshold`, not a shared `--confidence-threshold`
-  pretending to mean the same thing for both models).
+**Replacement implemented**: the shared "confidence" concept is gone. The return-size gate is now
+per-model too (see above), and the fuzzy shared score is now two separately-named, separately-thresholded
+"quality gates," one per model, with no claim that they're comparable to each other:
+- **PatchTST**: a plain boolean (`make_patchtst_predict_fn`) -- do all 3 predicted horizon bars agree on
+  the "up" direction? No score, no threshold, no dependence on walk history. This *deleted* the old
+  online-ranking mechanism (`patchtst_walk_forward_confidence` and its mutable, growing reference list)
+  entirely -- a real simplification of the code independent of anything about CVAE, and it removes the
+  "noisier early in the walk" asymmetry the two gates used to have.
+- **CVAE**: kept the existing sample-consensus fraction (`cvae_confidence_scores`, unchanged), thresholded
+  by its own dedicated knob (`--cvae-consensus-threshold`, default 0.5) instead of a shared
+  `--confidence-threshold` pretending to mean the same thing for both models.
 
 A trade requires `eligible AND meets_return_threshold AND` (coherent, for PatchTST | consensus clears its
-own threshold, for CVAE). The 5-case taxonomy (`no_trade`/`skipped`/3 trade outcomes) doesn't change --
-`skipped` just becomes concretely "cleared the return bar but failed its own model's quality gate,"
-defined per model, instead of "confidence too low" against a shared scale.
+own threshold, for CVAE) -- see `classify_walk_forward_decision`'s `passes_quality_gate` parameter. The
+5-case taxonomy (`no_trade`/`skipped`/3 trade outcomes) didn't change -- `skipped` is now concretely
+"cleared the return bar but failed its own model's quality gate," defined per model, instead of
+"confidence too low" against a shared scale.
 
 **Why not just drop the model-specific gate for both and go purely mechanical** (return-size threshold
 only, no secondary gate at all): that was considered and rejected for now, specifically because CVAE's
