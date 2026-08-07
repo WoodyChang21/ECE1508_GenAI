@@ -30,3 +30,40 @@ reason yet to prefer one setting over the other from this run alone.
 **Caveats**: one seed each; MAE not recorded this round (notebook reports RMSE only), so the
 volume MAE/RMSE heavy-tail check from earlier runs on this branch couldn't be repeated here;
 no backtest yet (deferred until a target/volume variant is picked).
+
+## hf_patchtst_fused_head_no_volume
+
+**What**: Step 2 of the ladder -- same setup as `hf_patchtst_fused_head` (fused head,
+anchored log-return target, `channel_attention` swept), but volume dropped entirely (not a
+context input, not a training target). Motivated by step 1's training logs showing
+`price_loss` (~7e-5) swamped by `vol_loss` (~0.18-0.27) despite `w_vol=0.5` -- the loss is
+now plain MSE over the 4 price components only (`price_only_mse_loss`).
+Notebook: `steven/train_patchtst_hf_channel_attention.ipynb`.
+
+| Model | Windows | OHLC RMSE ($) | Dir Acc (bar 1 / 2 / 3) |
+|---|---|---|---|
+| `channel_attention=False` | 2397 | 3.73 | 0.463 / 0.458 / **0.552** |
+| `channel_attention=True` | 2397 | **3.45** | 0.463 / **0.541** / 0.448 |
+
+**Conclusion: this is the same collapse already documented once on this branch, now
+confirmed under plain (unweighted) MSE too -- do not read the improved OHLC RMSE as a win.**
+Both settings beat step 1 on point error (3.45-3.73 vs. 4.84-4.93) and `best_val_loss` is
+near-zero (~2e-5), but **4 of the 6 directional-accuracy numbers are at or below 0.50** --
+worse than a coin flip. Removing volume removed the one loss term with real gradient
+variance to chase on a near-random-walk return target, so MSE again finds "predict ~near-0"
+as a cheap shortcut: tiny point error, no real directional signal. This is the exact failure
+mode flagged in the notebook's intro (the earlier return-target + no-volume run on this
+branch produced zero backtest trades at every threshold) -- reproducing it here with a
+cleaner single-term loss rules out "it was the specific 1.0/0.5 weighting" as the cause; the
+real driver is the return-based target's near-zero mean/variance once volume's gradient
+signal is gone.
+
+**Implication for the ladder**: dropping volume is not viable with the anchored-return
+target, regardless of loss weighting. Step 3 (raw-price target + volume) and step 4
+(raw-price target, no volume) are the more informative next runs -- RevIN's absolute-price
+target already fixed this exact collapse once before on this branch (0/2397 -> 95-98%
+coherence), so the open question is whether that fix holds with volume back in the loss
+(step 3), not whether volume-dropping itself is salvageable under a return target.
+
+**Caveats**: one seed each; no backtest run (the near/below-chance directional accuracy
+already rules this out without needing one); no MAE recorded (RMSE only, same as step 1).
