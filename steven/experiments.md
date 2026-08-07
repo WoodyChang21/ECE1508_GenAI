@@ -67,3 +67,39 @@ coherence), so the open question is whether that fix holds with volume back in t
 
 **Caveats**: one seed each; no backtest run (the near/below-chance directional accuracy
 already rules this out without needing one); no MAE recorded (RMSE only, same as step 1).
+
+## hf_patchtst_revin_raw_price_with_volume
+
+**What**: Step 3 of the ladder -- switches from the anchored log-return decomposition to a
+real RevIN (Kim et al. 2021) raw-price target, volume back in. RevIN was already proven on
+this branch to fix step 2's exact collapse (0/2397 -> 95-98% coherence), but that earlier
+proof dropped volume entirely -- this run adds it back to test whether the fix holds.
+**This run applies RevIN uniformly to all 5 channels (OHLC + log-volume)** -- the followup
+`hf_patchtst_revin_ohlc_global_volume` run (RevIN for OHLC only, volume kept on
+`data_pipeline.py`'s global `log_volume_norm` scale instead) is queued next to test whether
+volume's normalization treatment is what's driving the result below.
+Notebook: `steven/train_patchtst_hf_channel_attention.ipynb`.
+
+| Model | Windows | OHLC MAE/RMSE ($) | Volume MAE/RMSE | Dir Acc (bar 1/2/3) | Coherence |
+|---|---|---|---|---|---|
+| `channel_attention=False` | 2397 | 1.88 / 3.19 | 2.23M / 3.98M | 0.470 / 0.467 / 0.467 | 0.878 |
+| `channel_attention=True` | 2397 | 2.08 / 3.29 | 2.28M / 4.20M | 0.474 / 0.469 / 0.460 | **0.941** |
+
+**Conclusion: coherence is high (RevIN's fix for step 2's collapse does hold with volume
+back in), but directional accuracy is now below chance on all 6 bar/setting combinations
+(0.46-0.47, vs. 0.50 for a coin flip) -- worse than every other variant tried on this
+branch.** This is a different, more subtle failure than step 2's: the model isn't
+collapsing to "predict near-zero" (coherence is 0.88-0.94, i.e. it's confidently picking a
+direction), it's confidently picking the **wrong** direction more often than not. OHLC point
+error is comparable to the volume-free RevIN run from earlier on this branch (MAE/RMSE
+1.81/3.05 and 1.90/3.11 for False/True) -- only slightly worse -- so the price channels
+alone aren't badly damaged. The likely culprit is volume's normalization: RevIN's per-window
+mean/std, applied to a bursty signal like volume over only 70 samples, can produce noisy
+per-window scale estimates that this run doesn't isolate from the price channels (see
+`hf_patchtst_revin_ohlc_global_volume`, queued next, which excludes volume from RevIN and
+gives it a stable global scale instead).
+
+**Caveats**: one seed each; below-chance directional accuracy makes a backtest not worth
+running on this variant as-is; the followup run (global volume normalization) is needed
+before concluding whether raw-price + volume is viable at all, or whether this specific
+uniform-RevIN treatment is just a bad fit for volume.
