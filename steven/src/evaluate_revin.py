@@ -2,9 +2,9 @@
 
 Ports the walk-forward backtest methodology from the `steven` branch's `evaluate.py`
 (chronological single-equity-path simulation, take-profit-only orders with gap-through
-handling, online lookahead-free confidence ranking, 5-way outcome classification) --
-adapted for a model that predicts raw OHLC directly (via RevIN) instead of the anchored
-log-return component decomposition every function in `steven`'s original file assumes.
+handling, 5-way outcome classification) -- adapted for a model that predicts raw OHLC
+directly (via RevIN) instead of the anchored log-return component decomposition every
+function in `steven`'s original file assumes.
 
 The generic trading mechanics (`take_profit_exit`, `classify_walk_forward_decision`,
 `outcome_breakdown`, `equity_stats`, `buy_and_hold_benchmark`, `naive_periodic_benchmark`,
@@ -14,6 +14,12 @@ component representation. Only the prediction/confidence function and window bui
 new (`patchtst_revin_walk_forward_confidence`, `make_patchtst_revin_predict_fn`,
 `build_raw_ohlc_window`), since those are the parts actually tied to the return-component
 format this checkpoint doesn't use.
+
+`patchtst_revin_walk_forward_confidence` originally mirrored steven's magnitude-percentile
+ranking (rank predicted move size against this same walk's own prior coherent-up
+decisions). `confidence_calibration()` showed that ranking was actively counterproductive
+here -- win rate fell monotonically as that confidence rose -- so it's now a plain binary
+coherent-up signal (1.0/0.0); see the note above that function for the full reasoning.
 
 No CVAE support here -- no CVAE checkpoint exists for this experiment line (this notebook
 family never trained one), unlike `steven`'s own evaluate.py which compares PatchTST + CVAE.
@@ -56,10 +62,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--confidence-threshold", type=float, default=0.5,
-        help="Single fixed value, not a sweep -- a different threshold changes which "
-        "decisions actually get made along the way (trade vs. skip 1 bar), producing a "
-        "genuinely different simulated equity path, not just a different slice of the "
-        "same one (see run_walk_forward).",
+        help="Confidence is now binary -- 1.0 if all HORIZON predicted bars agree on "
+        "'up' (coherent), else 0.0 (see patchtst_revin_walk_forward_confidence) -- so any "
+        "threshold in (0.0, 1.0] behaves identically (coherent-only trading), and a "
+        "threshold of 0.0 additionally allows non-coherent windows through. Kept as a "
+        "float, not a bool flag, so this still reads as 'the same knob' as every other "
+        "notebook/script in this family that sweeps a confidence threshold.",
     )
     p.add_argument(
         "--min-return-threshold", type=float, default=0.001,
@@ -222,43 +230,33 @@ def naive_periodic_benchmark(df: pd.DataFrame, closes: np.ndarray, t0: int, test
 # RevIN-specific prediction + confidence -- NEW. Replaces steven's
 # make_patchtst_predict_fn/patchtst_walk_forward_confidence, which assume the anchored
 # return-component representation this model doesn't use.
+#
+# Confidence is coherence-only (binary), not a magnitude-percentile rank -- an earlier
+# version ranked predicted move size against this same walk's own prior coherent-up
+# decisions (mirroring steven's own patchtst_walk_forward_confidence), but
+# confidence_calibration() showed that ranking was actively counterproductive: win rate
+# fell *monotonically* as that magnitude-based confidence rose (86% in the lowest bin down
+# to 65% in the highest), while direction accuracy stayed flat/noisy across bins. A bigger
+# predicted move sets a more aggressive (harder-to-reach) take-profit target -- since
+# take_profit is also derived from the predicted magnitude -- so "confidence" was really
+# just measuring target aggressiveness, not correctness. Coherence itself is NOT the
+# problem: non-coherent windows have a clearly worse win rate (25-43%) than any coherent
+# bin (65-86%), so that gate is kept -- only the magnitude ranking on top of it is dropped.
 # ---------------------------------------------------------------------------
 
 
-def patchtst_revin_walk_forward_confidence(
-    pred_ohlc: np.ndarray, close_0: float, magnitude_reference: list[float]
-) -> float:
-    """pred_ohlc: (HORIZON, 4) predicted real OHLC for one window. Mirrors steven's
-    patchtst_walk_forward_confidence exactly (same coherent-up gate, same online/expanding
-    lookahead-free ranking), adapted for raw-price input: (1) require all HORIZON
-    predicted closes to land above close_0 (coherent-up), else confidence 0; (2) rank the
-    predicted exit-return magnitude against an ONLINE, expanding list of this same walk's
-    own prior coherent-up decisions -- nothing from the future ever leaks in.
-
-    The exit-price used for THIS ranking is the mean of all HORIZON bars' own predicted
-    open+close prices (matching steven's exit_price_from_components) -- deliberately a
-    different, less aggressive statistic than take_profit (max predicted close, used for
-    the actual order), so the confidence score isn't just re-deriving the same number the
-    trade itself is targeting. magnitude_reference is mutated in place (appended after
-    computing this window's own rank). The first coherent-up decision of the whole walk
-    has nothing to rank against yet, so confidence defaults to a neutral 0.5."""
+def patchtst_revin_walk_forward_confidence(pred_ohlc: np.ndarray, close_0: float) -> float:
+    """pred_ohlc: (HORIZON, 4) predicted real OHLC for one window. Binary: 1.0 if all
+    HORIZON predicted closes land above close_0 ("coherent up"), else 0.0. See the module
+    note above for why this replaced the earlier magnitude-percentile ranking."""
     pred_close = pred_ohlc[:, CLOSE_IDX]
     coherent_up = bool((pred_close > close_0).all())
-    if not coherent_up:
-        return 0.0
-    predicted_exit_price = float(pred_ohlc[:, [OPEN_IDX, CLOSE_IDX]].mean())
-    predicted_exit_return = predicted_exit_price / close_0 - 1.0
-    confidence = float(np.mean(np.array(magnitude_reference) <= predicted_exit_return)) if magnitude_reference else 0.5
-    magnitude_reference.append(predicted_exit_return)
-    return confidence
+    return 1.0 if coherent_up else 0.0
 
 
 def make_patchtst_revin_predict_fn(model: torch.nn.Module, device: torch.device):
     """Returns a predict(context_raw, close_0) -> {take_profit, confidence, price}
-    closure, single-window (batch=1) at a time. Maintains its own magnitude_reference
-    list across calls (see patchtst_revin_walk_forward_confidence) -- one closure
-    instance = one independent walk = one independent reference."""
-    magnitude_reference: list[float] = []
+    closure, single-window (batch=1) at a time."""
 
     def predict(context_raw: np.ndarray, close_0: float) -> dict:
         context_t = torch.from_numpy(context_raw)[None].to(device)  # (1, ctx_bars, 4)
@@ -267,7 +265,7 @@ def make_patchtst_revin_predict_fn(model: torch.nn.Module, device: torch.device)
             pred_price = model.revin.denormalize(pred_norm)  # (1, HORIZON, 4) real OHLC
         pred_ohlc = pred_price[0].cpu().numpy()  # (HORIZON, 4)
         take_profit = float(pred_ohlc[:, CLOSE_IDX].max())  # max of predicted closes, matches max_close_from_components
-        confidence = patchtst_revin_walk_forward_confidence(pred_ohlc, close_0, magnitude_reference)
+        confidence = patchtst_revin_walk_forward_confidence(pred_ohlc, close_0)
         return {"take_profit": take_profit, "confidence": confidence, "price": pred_ohlc}
 
     return predict
@@ -382,63 +380,35 @@ def walk_forward_stats(df: pd.DataFrame, result: dict, ctx_bars: int) -> dict:
     return out
 
 
-def confidence_calibration(decisions: list[dict], n_bins: int = 5) -> list[dict]:
-    """Checks whether `confidence` actually tracks correctness, independent of whether a
-    decision was actually traded (would_trade is gated by min_return_threshold too, which
-    would otherwise confound this check). Uses every decision point's trade_return/
-    direction_correct -- both computed unconditionally in run_walk_forward regardless of
-    would_trade, i.e. "what would have happened had this been traded" -- so this can run
-    on the full decision log without re-simulating anything.
+def confidence_calibration(decisions: list[dict]) -> list[dict]:
+    """Checks whether `confidence` (now binary -- coherent-up or not, see
+    patchtst_revin_walk_forward_confidence) tracks correctness, independent of whether a
+    decision was actually traded (would_trade is also gated by min_return_threshold,
+    which would otherwise confound this check). Uses every decision point's
+    trade_return/direction_correct -- both computed unconditionally in run_walk_forward
+    regardless of would_trade, i.e. "what would have happened had this been traded" -- so
+    this runs on the full decision log without re-simulating anything.
 
-    Decisions with confidence == 0 (not coherent-up -- see
-    patchtst_revin_walk_forward_confidence) are reported as their own row, separately from
-    the percentile-rank bins below: confidence==0 isn't a low percentile on the same scale,
-    it's a qualitatively different case (the model made no directional call at all).
-
-    The remaining (coherent-up, confidence in (0, 1]) decisions are split into n_bins
-    equal-width confidence bins. For each bin: how many decisions landed there, the
-    win rate (trade_return > 0) and directional accuracy (direction_correct) within it,
-    and the mean confidence actually observed in that bin. If confidence is doing real
-    work, win_rate/direction_accuracy should trend upward across the bins; if it's flat or
-    noisy, the score isn't tracking correctness, just predicted-move size."""
-    zero_conf = [d for d in decisions if d["confidence"] == 0.0]
-    scored = [d for d in decisions if d["confidence"] > 0.0]
-
+    An earlier version of this function binned a continuous magnitude-percentile
+    confidence score; that ranking was dropped (see the module note above
+    patchtst_revin_walk_forward_confidence) once it turned out to be inversely related to
+    win rate. With confidence now binary, this just reports the two populations directly:
+    coherent-up vs. not."""
+    groups = [("coherent-up (confidence=1)", 1.0), ("not coherent-up (confidence=0)", 0.0)]
     rows = []
-    if zero_conf:
-        rets = np.array([d["trade_return"] for d in zero_conf])
-        correct = np.array([d["direction_correct"] for d in zero_conf])
+    for label, value in groups:
+        in_group = [d for d in decisions if d["confidence"] == value]
+        if not in_group:
+            rows.append({"bin": label, "n": 0, "win_rate": None, "direction_accuracy": None})
+            continue
+        rets = np.array([d["trade_return"] for d in in_group])
+        correct = np.array([d["direction_correct"] for d in in_group])
         rows.append({
-            "bin": "confidence == 0 (not coherent-up)",
-            "n": len(zero_conf),
+            "bin": label,
+            "n": len(in_group),
             "win_rate": float((rets > 0).mean()),
             "direction_accuracy": float(correct.mean()),
-            "mean_confidence": 0.0,
         })
-
-    if scored:
-        edges = np.linspace(0.0, 1.0, n_bins + 1)
-        confidences = np.array([d["confidence"] for d in scored])
-        bin_idx = np.clip(np.digitize(confidences, edges[1:-1], right=True), 0, n_bins - 1)
-        for b in range(n_bins):
-            in_bin = [d for d, bi in zip(scored, bin_idx) if bi == b]
-            if not in_bin:
-                rows.append({
-                    "bin": f"[{edges[b]:.2f}, {edges[b+1]:.2f}]", "n": 0,
-                    "win_rate": None, "direction_accuracy": None, "mean_confidence": None,
-                })
-                continue
-            rets = np.array([d["trade_return"] for d in in_bin])
-            correct = np.array([d["direction_correct"] for d in in_bin])
-            confs = np.array([d["confidence"] for d in in_bin])
-            rows.append({
-                "bin": f"[{edges[b]:.2f}, {edges[b+1]:.2f}]",
-                "n": len(in_bin),
-                "win_rate": float((rets > 0).mean()),
-                "direction_accuracy": float(correct.mean()),
-                "mean_confidence": float(confs.mean()),
-            })
-
     return rows
 
 
