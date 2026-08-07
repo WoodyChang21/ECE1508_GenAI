@@ -1,0 +1,25 @@
+{
+  "experiment": {
+    "name": "hf_patchtst_revin_raw_price_with_volume",
+    "description": "HF PatchTSTModel + RevIN, raw OHLC + log-volume target (5 channels), channel_attention swept. Step 3 of the experiment ladder -- isolates whether RevIN's earlier fix for the return-target collapse holds with volume back in.",
+    "target": "raw_price_revin",
+    "include_volume": true,
+    "loss_weights": {
+      "note": "unweighted -- RevIN normalizes all 5 channels to comparable scale, see intro markdown"
+    },
+    "channel_attention": true,
+    "seed": 0
+  },
+  "best_val_loss": 0.15141670254866282,
+  "n_windows": 2397,
+  "ohlc_mae": 2.075601100921631,
+  "ohlc_rmse": 3.286466598510742,
+  "volume_mae": 2282222.5,
+  "volume_rmse": 4198577.5,
+  "directional_accuracy": [
+    0.4739257405089696,
+    0.4685022945348352,
+    0.46015853149770547
+  ],
+  "coherence_rate": 0.9411764705882353
+}
