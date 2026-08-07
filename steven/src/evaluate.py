@@ -1,15 +1,28 @@
 """Evaluate PatchTST and the CVAE on the same fixed test window set.
 
---patchtst-checkpoint accepts any of three checkpoint architectures -- the original
+--patchtst-checkpoint accepts any of four checkpoint architectures -- the original
 hand-rolled PatchTST (src/models/patchtst.py), the HF PatchTSTModel-backed PatchTSTHF
-(src/models/patchtst_hf.py), or its volume-dropped variant PatchTSTHFPriceOnly -- all
-auto-detected from the checkpoint's saved config (see detect_patchtst_arch). Both HF
-variants only support a fixed context_length (no variable-length curriculum), so when
-either is detected, test/plot windows are restricted to that fixed length instead of
-steven's original 2-10 day curriculum -- see build_patchtst_model/run_patchtst and the
-arch branches in main()/make_plots(). PatchTSTHFPriceOnly has no volume output at all;
-run_patchtst synthesizes a dummy all-zero volume so downstream code keeps working, and
-main() logs a warning that patchtst_volume_mae_rmse is meaningless for that arch.
+(src/models/patchtst_hf.py), its volume-dropped variant PatchTSTHFPriceOnly, or its
+raw-OHLC-price/RevIN variant PatchTSTHFRevIN -- all auto-detected from the checkpoint's
+saved config (see detect_patchtst_arch). All three HF variants only support a fixed
+context_length (no variable-length curriculum), so when any is detected, test/plot
+windows are restricted to that fixed length instead of steven's original 2-10 day
+curriculum -- see build_patchtst_model/run_patchtst and the arch branches in
+main()/make_plots().
+
+PatchTSTHFPriceOnly and PatchTSTHFRevIN both have no volume output at all; run_patchtst
+synthesizes a dummy all-zero volume so downstream code keeps working, and main() logs a
+warning that patchtst_volume_mae_rmse (and, for these two, patchtst_reparam_mae_rmse too)
+is meaningless for that arch.
+
+PatchTSTHFRevIN additionally predicts raw OHLC price directly instead of the anchored
+log-return decomposition every other architecture uses, and needs raw OHLC *context*
+(not the return-decomposition masked_tensor everything else in this file consumes) --
+run_patchtst converts its output back into the same anchored-components format via
+ohlc_to_anchored_components() (the inverse of data_pipeline.py's reconstruct_prices), so
+metrics_for_slice/run_backtest/bracket_order_exit etc. all work completely unchanged
+underneath it. See main()'s ohlc_raw array and collate()'s start_idx field for how the
+raw context gets threaded through.
 
 Usage:
     python steven/src/evaluate.py \\
@@ -61,7 +74,7 @@ from src.data_pipeline import (
 )
 from src.models.cvae_inpainting import CVAEInpainting
 from src.models.patchtst import PatchTST
-from src.models.patchtst_hf import PRICE_ONLY_CHANNEL_IDX, PatchTSTHF, PatchTSTHFPriceOnly
+from src.models.patchtst_hf import PRICE_ONLY_CHANNEL_IDX, PatchTSTHF, PatchTSTHFPriceOnly, PatchTSTHFRevIN
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
@@ -138,15 +151,18 @@ def derive_output_suffix(patchtst_checkpoint_path: str) -> str:
 
 
 def detect_patchtst_arch(cfg: dict) -> str:
-    """'hf_priceonly' for the volume-dropped HF variant PatchTSTHFPriceOnly
-    (src/models/patchtst_hf.py, identifiable by the top-level drop_volume flag saved by
-    train_patchtst_hf_channel_attention_{True,False}.ipynb's current version), 'hf' for
-    the HF PatchTSTModel-backed PatchTSTHF (identifiable by cfg['model']'s
-    channel_attention key), 'custom' for the original hand-rolled PatchTST
-    (src/models/patchtst.py, which has neither). Auto-detected from the checkpoint's
-    saved config so --patchtst-checkpoint works for any of the three without a separate
-    CLI flag. Takes the *whole* saved config (not just cfg['model']) -- drop_volume lives
-    at the top level, alongside context_length/data_path/seed, not inside 'model'."""
+    """'hf_revin' for the raw-OHLC-price RevIN variant PatchTSTHFRevIN (identifiable by
+    the top-level target=='raw_ohlc_revin' flag saved by
+    train_patchtst_revin_channel_attention_{True,False}.ipynb), 'hf_priceonly' for the
+    volume-dropped variant PatchTSTHFPriceOnly (top-level drop_volume flag), 'hf' for the
+    HF PatchTSTModel-backed PatchTSTHF (cfg['model']'s channel_attention key), 'custom'
+    for the original hand-rolled PatchTST (src/models/patchtst.py, which has none of the
+    above). Auto-detected from the checkpoint's saved config so --patchtst-checkpoint
+    works for any of the four without a separate CLI flag. Takes the *whole* saved config
+    (not just cfg['model']) -- target/drop_volume live at the top level, alongside
+    context_length/data_path/seed, not inside 'model'."""
+    if cfg.get("target") == "raw_ohlc_revin":
+        return "hf_revin"
     if cfg.get("drop_volume"):
         return "hf_priceonly"
     return "hf" if "channel_attention" in cfg["model"] else "custom"
@@ -157,7 +173,9 @@ def build_patchtst_model(pt_ckpt: dict, device: torch.device):
     detect_patchtst_arch), loads its weights, and returns (model, arch)."""
     cfg = pt_ckpt["config"]
     arch = detect_patchtst_arch(cfg)
-    if arch == "hf_priceonly":
+    if arch == "hf_revin":
+        model = PatchTSTHFRevIN(context_length=cfg["context_length"], **cfg["model"])
+    elif arch == "hf_priceonly":
         model = PatchTSTHFPriceOnly(context_length=cfg["context_length"], **cfg["model"])
     elif arch == "hf":
         model = PatchTSTHF(context_length=cfg["context_length"], **cfg["model"])
@@ -168,18 +186,75 @@ def build_patchtst_model(pt_ckpt: dict, device: torch.device):
     return model, arch
 
 
-def run_patchtst(patchtst, arch: str, context: torch.Tensor, patch_pad: torch.Tensor):
+def ohlc_to_anchored_components(ohlc: torch.Tensor, close_0: torch.Tensor) -> torch.Tensor:
+    """Inverse of data_pipeline.py's reconstruct_prices: ohlc (B, HORIZON, 4) absolute
+    [open,high,low,close] -> (B, HORIZON, 4) anchored components [open_ret, body_ret,
+    upper_wick, lower_wick], open_ret anchored to close_0 (B,) -- matches build_window's
+    horizon anchor-correction convention (body_ret/wicks are anchor-invariant, computed
+    within-bar). Used only for arch == 'hf_revin', so PatchTSTHFRevIN's raw price output
+    can flow through the exact same metrics_for_slice/run_backtest/bracket_order_exit
+    code every other architecture already uses, unmodified.
+
+    Clamps predicted high/low into a valid candle shape first (high >= max(open,close),
+    low <= min(open,close)) -- PatchTSTHFRevIN has no output bounding at all (unlike the
+    tanh/sigmoid-capped return-based architectures), so it isn't guaranteed to produce a
+    physically valid candle on its own; an un-clamped violation would otherwise take
+    log() of a non-positive ratio."""
+    eps = 1e-6
+    o = ohlc[..., 0].clamp(min=eps)
+    h = ohlc[..., 1]
+    l = ohlc[..., 2]
+    c = ohlc[..., 3].clamp(min=eps)
+
+    body_hi = torch.maximum(o, c)
+    body_lo = torch.minimum(o, c)
+    h = torch.maximum(h, body_hi).clamp(min=eps)
+    l = torch.minimum(l, body_lo).clamp(min=eps)
+
+    close_0 = close_0[:, None].clamp(min=eps)
+    open_ret = torch.log(o / close_0)
+    body_ret = torch.log(c / o)
+    upper_wick = torch.log(h / body_hi)
+    lower_wick = torch.log(body_lo / l)
+    return torch.stack([open_ret, body_ret, upper_wick, lower_wick], dim=-1)
+
+
+def run_patchtst(
+    patchtst, arch: str, context: torch.Tensor, patch_pad: torch.Tensor,
+    start_idx: torch.Tensor | None = None, ohlc_raw: np.ndarray | None = None,
+):
     """Dispatches to whichever calling convention this architecture uses, and always
-    returns (price, volume) regardless of arch. context is already
+    returns (price, volume) regardless of arch, with price always in the anchored-
+    components format metrics_for_slice/run_backtest expect. context is already
     masked_tensor[:MAX_CONTEXT, :N_FEATURE_CHANNELS] either way (see to_patchtst_input);
-    only the two HF variants ignore patch_pad, since they have a fixed context_length and
+    the three HF variants ignore patch_pad, since they have a fixed context_length and
     were never trained on padded/short-context windows (see module docstring).
+
+    'hf_revin' needs raw OHLC context, not the return-decomposition `context` tensor
+    every other arch uses -- start_idx (this batch's window start row indices) and
+    ohlc_raw (the full raw-OHLC price array, see main()) are required for this arch and
+    used to slice fresh raw-price windows directly, bypassing `context` entirely. Its
+    output (already absolute price after RevIN denormalization) is converted back to
+    anchored components via ohlc_to_anchored_components() so it's interchangeable with
+    every other arch from here on. Also synthesizes a dummy all-zero volume tensor, same
+    as 'hf_priceonly' below, since PatchTSTHFRevIN has no volume output at all.
 
     'hf_priceonly' further slices context down to PRICE_ONLY_CHANNEL_IDX (volume
     excluded) before calling the model, and synthesizes a dummy all-zero volume tensor
     since PatchTSTHFPriceOnly has no volume output at all -- callers/metrics that read
-    the returned volume for this arch are reading a placeholder, not a real prediction
-    (see the warning logged in main())."""
+    the returned volume for this arch (or 'hf_revin') are reading a placeholder, not a
+    real prediction (see the warning logged in main())."""
+    if arch == "hf_revin":
+        if start_idx is None or ohlc_raw is None:
+            raise ValueError("arch == 'hf_revin' requires start_idx and ohlc_raw (see main()).")
+        ctx_np = np.stack([ohlc_raw[s : s + MAX_CONTEXT] for s in start_idx.cpu().tolist()])
+        ctx_t = torch.from_numpy(ctx_np).to(context.device, dtype=torch.float32)
+        pred_norm = patchtst(ctx_t)
+        pred_price = patchtst.revin.denormalize(pred_norm)     # (B, HORIZON, 4) absolute OHLC
+        close_0 = ctx_t[:, -1, 3]                                # last context bar's real close
+        price = ohlc_to_anchored_components(pred_price, close_0)
+        volume = torch.zeros(price.shape[0], price.shape[1], device=price.device, dtype=price.dtype)
+        return price, volume
     if arch == "hf_priceonly":
         context_price_only = context[..., PRICE_ONLY_CHANNEL_IDX]
         price = patchtst(context_price_only)
@@ -192,7 +267,7 @@ def run_patchtst(patchtst, arch: str, context: torch.Tensor, patch_pad: torch.Te
 
 def collate(batch: list[dict]) -> dict:
     context, patch_pad = zip(*(to_patchtst_input(b["masked_tensor"].numpy()) for b in batch))
-    return {
+    out = {
         "masked_tensor": torch.stack([b["masked_tensor"] for b in batch]),
         "context": torch.stack([torch.from_numpy(c) for c in context]),
         "patch_key_padding_mask": torch.stack([torch.from_numpy(m) for m in patch_pad]),
@@ -200,6 +275,13 @@ def collate(batch: list[dict]) -> dict:
         "close_0": torch.tensor([b["close_0"] for b in batch], dtype=torch.float64),
         "ctx_bars": torch.tensor([b["ctx_bars"] for b in batch], dtype=torch.int64),
     }
+    # start_idx: only needed for arch == 'hf_revin' (see run_patchtst), which slices raw
+    # OHLC windows directly from main()'s ohlc_raw array instead of using `context`.
+    # WindowDataset always includes it (data_pipeline.py); guarded here anyway in case a
+    # caller ever swaps in a different dataset that doesn't.
+    if "start_idx" in batch[0]:
+        out["start_idx"] = torch.tensor([b["start_idx"] for b in batch], dtype=torch.int64)
+    return out
 
 
 def mae_rmse(pred: np.ndarray, true: np.ndarray) -> tuple[float, float]:
@@ -214,8 +296,9 @@ def directional_accuracy(pred_close_ret: np.ndarray, true_close_ret: np.ndarray)
     return (np.sign(pred_close_ret) == np.sign(true_close_ret)).mean(axis=0)
 
 
-def collect_predictions(patchtst, arch, cvae, loader, device, num_samples):
-    """Runs both models over the fixed test loader, returns flat numpy arrays."""
+def collect_predictions(patchtst, arch, cvae, loader, device, num_samples, ohlc_raw=None):
+    """Runs both models over the fixed test loader, returns flat numpy arrays. ohlc_raw
+    is only required when arch == 'hf_revin' (see run_patchtst/main())."""
     all_true_y, all_pt_y = [], []
     all_cvae_y = []  # (K, N, 15)
     all_close0, all_ctx = [], []
@@ -225,9 +308,10 @@ def collect_predictions(patchtst, arch, cvae, loader, device, num_samples):
         patch_pad = batch["patch_key_padding_mask"].to(device)
         masked_tensor = batch["masked_tensor"].to(device)
         y = batch["y"]
+        start_idx = batch.get("start_idx")
 
         with torch.no_grad():
-            pt_price, pt_vol = run_patchtst(patchtst, arch, context, patch_pad)
+            pt_price, pt_vol = run_patchtst(patchtst, arch, context, patch_pad, start_idx=start_idx, ohlc_raw=ohlc_raw)
             pt_y = torch.cat([pt_price.reshape(pt_price.shape[0], -1), pt_vol], dim=1)
 
             cvae_price, cvae_vol = cvae.sample(masked_tensor, k=num_samples)  # (K,B,3,4),(K,B,3)
@@ -677,7 +761,7 @@ def render_panel(
     return realized, would_enter
 
 
-def make_plots(df, feat, opens, closes, patchtst, arch, cvae, test_sampler, args, device, sell_bound):
+def make_plots(df, feat, opens, closes, patchtst, arch, cvae, test_sampler, args, device, sell_bound, ohlc_raw=None):
     """Draws num_plot_samples fresh random (start_idx, ctx_bars) windows -- NOT the
     fixed/seeded eval test_pairs -- so each run's sample plots differ. Each figure has
     3 candlestick panels: ground truth (left), PatchTST's generated horizon candles (top
@@ -725,10 +809,10 @@ def make_plots(df, feat, opens, closes, patchtst, arch, cvae, test_sampler, args
     records = []
     plotted = 0
     for i in range(args.num_plot_samples):
-        # Both HF variants only support their trained fixed context_length (no padding
-        # support -- see module docstring), so plot windows are pinned to MAX_CONTEXT
-        # instead of sampling steven's original variable-length curriculum.
-        ctx_bars = MAX_CONTEXT if arch in ("hf", "hf_priceonly") else int(rng.choice(CONTEXT_LENGTHS))
+        # All three HF variants only support their trained fixed context_length (no
+        # padding support -- see module docstring), so plot windows are pinned to
+        # MAX_CONTEXT instead of sampling steven's original variable-length curriculum.
+        ctx_bars = MAX_CONTEXT if arch in ("hf", "hf_priceonly", "hf_revin") else int(rng.choice(CONTEXT_LENGTHS))
         starts = test_sampler.valid_starts(ctx_bars)
         if len(starts) == 0:
             logger.warning("no valid starts for ctx_bars=%d, skipping sample %d", ctx_bars, i)
@@ -740,9 +824,10 @@ def make_plots(df, feat, opens, closes, patchtst, arch, cvae, test_sampler, args
         context_np, patch_pad_np = to_patchtst_input(w["masked_tensor"])
         context_t = torch.from_numpy(context_np).unsqueeze(0).to(device)
         patch_pad_t = torch.from_numpy(patch_pad_np).unsqueeze(0).to(device)
+        start_idx_t = torch.tensor([start_idx], dtype=torch.int64)
 
         with torch.no_grad():
-            pt_price, _ = run_patchtst(patchtst, arch, context_t, patch_pad_t)
+            pt_price, _ = run_patchtst(patchtst, arch, context_t, patch_pad_t, start_idx=start_idx_t, ohlc_raw=ohlc_raw)
             # K draws: draw 0 is rendered as the candlestick path, all K feed the quantile target
             cvae_price, _ = cvae.sample(masked_tensor, k=args.num_samples)
 
@@ -863,6 +948,10 @@ def main() -> None:
 
     df, bounds, stats = build_dataset(pt_cfg["data_path"])
     feat, opens, closes = extract_arrays(df)
+    # Raw OHLC price array -- only used for arch == 'hf_revin' (see run_patchtst), which
+    # needs raw price context instead of the return-decomposition `context` tensor. Cheap
+    # to build unconditionally (one extra float32 array the size of the dataframe).
+    ohlc_raw = df[["open", "high", "low", "close"]].to_numpy(dtype=np.float32)
 
     sell_bound = train_exit_return_bound(opens, closes, bounds["train"], percentile=args.sell_bound_percentile)
     logger.info(
@@ -872,21 +961,24 @@ def main() -> None:
 
     patchtst, arch = build_patchtst_model(pt_ckpt, device)
     logger.info("patchtst checkpoint architecture: %s", arch)
-    if arch == "hf_priceonly":
+    if arch in ("hf_priceonly", "hf_revin"):
         logger.warning(
-            "arch=hf_priceonly: this checkpoint has no volume output at all -- "
-            "patchtst_volume_mae_rmse below reflects a dummy all-zero prediction "
-            "(see run_patchtst), not a real forecast. Ignore it."
+            "arch=%s: this checkpoint has no volume output at all -- "
+            "patchtst_volume_mae_rmse (and patchtst_reparam_mae_rmse, which averages "
+            "volume in with price) below reflect a dummy all-zero prediction "
+            "(see run_patchtst), not a real forecast. Trust OHLC MAE/RMSE instead.",
+            arch,
         )
 
     test_sampler = WindowSampler(*bounds["test"])
     rng = np.random.default_rng(args.seed)
-    if arch in ("hf", "hf_priceonly"):
-        # Both HF variants only support their trained fixed context_length -- no padding
-        # support, never trained on shorter/padded windows (see module docstring) --
-        # so evaluation is restricted to that fixed length instead of steven's original
-        # 2-10 day curriculum. All windows land in the 'long' bucket below; compare
-        # against that bucket specifically, not 'overall' from a 'custom'-arch run.
+    if arch in ("hf", "hf_priceonly", "hf_revin"):
+        # All three HF variants only support their trained fixed context_length -- no
+        # padding support, never trained on shorter/padded windows (see module
+        # docstring) -- so evaluation is restricted to that fixed length instead of
+        # steven's original 2-10 day curriculum. All windows land in the 'long' bucket
+        # below; compare against that bucket specifically, not 'overall' from a
+        # 'custom'-arch run.
         test_starts_full = test_sampler.valid_starts(MAX_CONTEXT)
         n_test = min(args.n_test_windows, len(test_starts_full))
         test_starts = rng.choice(test_starts_full, size=n_test, replace=False)
@@ -910,7 +1002,7 @@ def main() -> None:
     cvae.eval()
 
     true_y, pt_y, cvae_y, close_0, ctx_bars = collect_predictions(
-        patchtst, arch, cvae, test_loader, device, args.num_samples
+        patchtst, arch, cvae, test_loader, device, args.num_samples, ohlc_raw=ohlc_raw
     )
 
     n, k = len(pt_y), cvae_y.shape[0]
@@ -937,7 +1029,7 @@ def main() -> None:
     logger.info("wrote metrics to %s", args.metrics_out)
     logger.info("overall: %s", json.dumps(results["overall"], indent=2))
 
-    make_plots(df, feat, opens, closes, patchtst, arch, cvae, test_sampler, args, device, sell_bound)
+    make_plots(df, feat, opens, closes, patchtst, arch, cvae, test_sampler, args, device, sell_bound, ohlc_raw=ohlc_raw)
 
 
 if __name__ == "__main__":

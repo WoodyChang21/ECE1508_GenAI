@@ -451,4 +451,5 @@ class WindowDataset(Dataset):
             "y": torch.from_numpy(w["y"]),
             "close_0": w["close_0"],
             "ctx_bars": w["ctx_bars"],
+            "start_idx": start_idx,
         }
