@@ -1,0 +1,21 @@
+{
+  "experiment": {
+    "name": "hf_patchtst_fused_head_no_volume",
+    "description": "HF PatchTST model, fused head, anchored log-return target, volume dropped entirely (input + target) -- channel_attention swept. Step 2 of the experiment ladder; known risk of return-target + no-volume causing a directional collapse, see intro markdown.",
+    "target": "anchored_log_return",
+    "include_volume": false,
+    "loss_weights": {
+      "price": 1.0
+    },
+    "channel_attention": true,
+    "seed": 0
+  },
+  "best_val_loss": 1.95855724644692e-05,
+  "n_windows": 2397,
+  "ohlc_rmse": 3.4506491598606863,
+  "directional_accuracy": [
+    0.46349603671255735,
+    0.5406758448060075,
+    0.4476428869420108
+  ]
+}
