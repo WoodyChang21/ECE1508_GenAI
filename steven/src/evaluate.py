@@ -358,6 +358,16 @@ def model_trade_outcomes(true_ohlc: np.ndarray, take_profit: np.ndarray, close_0
     }
 
 
+def nearest_draw_index(draw_exit_prices: np.ndarray, target: float) -> int:
+    """draw_exit_prices: (K,) each of CVAE's K sampled draws' own exit_price_from_components
+    value for one window. target: the take-profit price actually used for that window (a
+    percentile across all K draws -- see main()/run_backtest -- not tied to any single
+    draw). Returns the index of whichever draw's own exit price is closest to target --
+    used by make_plots to pick one illustrative draw to render as candles that's visually
+    consistent with a target that's really a statistic over the whole ensemble."""
+    return int(np.argmin(np.abs(draw_exit_prices - target)))
+
+
 def sweep_thresholds(
     confidence: np.ndarray, trade_return: np.ndarray, thresholds: list[float],
     hit_take_profit: np.ndarray | None = None,
@@ -620,7 +630,9 @@ def render_panel(
     return realized, would_enter
 
 
-def make_plots(df, test_pairs, pt_y, cvae_y, close_0, pt_take_profit, cvae_take_profit, cvae_label, args):
+def make_plots(
+    df, test_pairs, pt_y, cvae_y, close_0, pt_take_profit, cvae_take_profit, cvae_exit_prices, cvae_label, args
+):
     """Selects 8 illustrative windows from the full fixed test set -- one per (case,
     context-length) combination, choosing uniformly at random among the windows that
     match, where case is one of CASE_LABELS and context-length is "narrow" or "wide" (see
@@ -632,28 +644,35 @@ def make_plots(df, test_pairs, pt_y, cvae_y, close_0, pt_take_profit, cvae_take_
     models' contrasting behavior on identical real price action is visible side by side.
 
     Reuses the already-computed, already sell_bound-shrunk predictions from the fixed
-    evaluation set (pt_y, cvae_y, close_0, pt_take_profit, cvae_take_profit, cvae_label --
-    all computed once in main(), aligned index-for-index with test_pairs) rather than
-    re-running the models on freshly sampled windows: re-sampling CVAE fresh could give a
-    different set of k draws -- and therefore a different take-profit quantile and a
-    different outcome -- than the one that actually earned this window its case label.
-    Only *which* qualifying window is picked per (case, ctx-length) slot is randomized
-    (unseeded, so a different concrete example each run), always from the same fixed,
-    reproducible population used for the metrics/backtest above.
+    evaluation set (pt_y, cvae_y, close_0, pt_take_profit, cvae_take_profit, cvae_exit_prices,
+    cvae_label -- all computed once in main(), aligned index-for-index with test_pairs)
+    rather than re-running the models on freshly sampled windows: re-sampling CVAE fresh
+    could give a different set of k draws -- and therefore a different take-profit
+    quantile and a different outcome -- than the one that actually earned this window its
+    case label. Only *which* qualifying window is picked per (case, ctx-length) slot is
+    randomized (unseeded, so a different concrete example each run), always from the same
+    fixed, reproducible population used for the metrics/backtest above.
 
     Each figure has 3 candlestick panels: ground truth (left), PatchTST's generated
-    horizon candles (top right), CVAE's generated horizon candles from its first sampled
-    draw (bottom right). Each panel gets a red box around the generated/predicted 3
-    candles, a dashed buy-price line, and a solid take-profit line per model, starting at
-    the left edge of that box and running to the panel's right edge -- the ground truth
-    panel shows both models' lines together for comparison. A line pinned outside the
-    panel's y-range is drawn just inside the edge instead, annotated with its real price.
-    The PatchTST and CVAE panels additionally report in the text table whether that
-    model's take-profit order actually filled or expired against the REAL price action
-    (see take_profit_exit). Also writes samples.json alongside the PNGs -- the same
-    per-sample numbers (candles, buy/take-profit prices, outcome, spread) plus its case
-    and ctx bucket, structured for update_report.py to regenerate v1.md's Results tables
-    without transcribing PNGs by hand."""
+    horizon candles (top right), CVAE's generated horizon candles (bottom right). CVAE's
+    take-profit target is a percentile across all k sampled draws' own exit prices (see
+    run_backtest), not tied to any single draw -- so rather than always rendering an
+    arbitrary draw (which could show a target line sitting outside the candles drawn
+    under it), the rendered draw is whichever of the k has its own exit price closest to
+    that target (see nearest_draw_index), keeping the illustration visually consistent
+    with the line drawn over it. Each panel gets a red box around the generated/predicted
+    3 candles, a dashed buy-price line, and a solid take-profit line per model, starting
+    at the left edge of that box and running to the panel's right edge -- the ground
+    truth panel shows both models' lines together for comparison. A line pinned outside
+    the panel's y-range is drawn just inside the edge instead, annotated with its real
+    price. The PatchTST and CVAE panels additionally report in the text table whether
+    that model's take-profit order actually filled or expired against the REAL price
+    action (see take_profit_exit) -- this verdict is always computed from real
+    ground-truth OHLC, independent of which draw is shown or whether the drawn candles
+    themselves reach the target line. Also writes samples.json alongside the PNGs -- the
+    same per-sample numbers (candles, buy/take-profit prices, outcome, spread) plus its
+    case and ctx bucket, structured for update_report.py to regenerate v1.md's Results
+    tables without transcribing PNGs by hand."""
     out_dir = Path(args.plots_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -687,10 +706,14 @@ def make_plots(df, test_pairs, pt_y, cvae_y, close_0, pt_take_profit, cvae_take_
             start_idx, ctx_bars = test_pairs[idx]
 
             pt_ohlc = reconstruct_prices(pt_y[idx, :12].reshape(3, 4), close_0[idx])  # (3,4)
-            cvae_ohlc = reconstruct_prices(cvae_y[0, idx, :12].reshape(3, 4), close_0[idx])  # draw 0, (3,4)
             buy_price = float(close_0[idx])
             pt_tp = float(pt_take_profit[idx])
             cvae_tp = float(cvae_take_profit[idx])
+            # Render whichever draw's own exit price is closest to the target actually
+            # used (a percentile across all k draws) -- not always draw 0 -- so the
+            # candles shown are visually consistent with the line drawn over them.
+            draw_idx = nearest_draw_index(cvae_exit_prices[:, idx], cvae_tp)
+            cvae_ohlc = reconstruct_prices(cvae_y[draw_idx, idx, :12].reshape(3, 4), close_0[idx])  # (3,4)
 
             ctx_tail = min(ctx_bars, 20)
             hz_start = start_idx + ctx_bars
@@ -720,7 +743,7 @@ def make_plots(df, test_pairs, pt_y, cvae_y, close_0, pt_take_profit, cvae_take_
                 true_horizon_ohlc=true_horizon_ohlc, sell_limit=pt_tp,
             )
             cvae_realized, cvae_would_enter = render_panel(
-                fig, outer[3:5, 1], outer[5, 1], cvae_df, buy_price, "CVAE generated (1 draw)",
+                fig, outer[3:5, 1], outer[5, 1], cvae_df, buy_price, "CVAE generated (draw nearest target)",
                 sell_targets=[("CVAE TP", cvae_tp, "tab:green", "-")],
                 true_horizon_ohlc=true_horizon_ohlc, sell_limit=cvae_tp,
             )
@@ -865,7 +888,10 @@ def main() -> None:
     logger.info("wrote metrics to %s", args.metrics_out)
     logger.info("overall: %s", json.dumps(results["overall"], indent=2))
 
-    make_plots(df, test_pairs, pt_y, cvae_y, close_0, pt_take_profit, cvae_take_profit, cvae_outcomes["label"], args)
+    make_plots(
+        df, test_pairs, pt_y, cvae_y, close_0, pt_take_profit, cvae_take_profit,
+        cvae_exit_prices, cvae_outcomes["label"], args,
+    )
 
 
 if __name__ == "__main__":

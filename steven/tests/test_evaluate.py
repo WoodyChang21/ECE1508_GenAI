@@ -199,3 +199,18 @@ def test_model_trade_outcomes_matches_take_profit_exit_and_classify():
     np.testing.assert_array_equal(out["hit_take_profit"], [True, False])
     np.testing.assert_array_equal(out["eligible"], [True, False])
     np.testing.assert_array_equal(out["label"], ["win_take_profit", "no_trade"])
+
+
+def test_nearest_draw_index_picks_closest():
+    draws = np.array([100.0, 102.0, 105.0, 110.0])
+    assert ev.nearest_draw_index(draws, 106.0) == 2  # 105 is closer to 106 than 110 is
+    assert ev.nearest_draw_index(draws, 100.5) == 0
+    assert ev.nearest_draw_index(draws, 111.0) == 3
+
+
+def test_nearest_draw_index_tie_breaks_to_first_occurrence():
+    draws = np.array([90.0, 100.0, 110.0])
+    assert ev.nearest_draw_index(draws, 100.0) == 1  # exact match, unambiguous
+    # 95 and 105 are both exactly 5 away from 100 -- np.argmin returns the first occurrence
+    tied_draws = np.array([95.0, 105.0])
+    assert ev.nearest_draw_index(tied_draws, 100.0) == 0
