@@ -2,43 +2,43 @@
   "overall": {
     "n_windows": 2397,
     "patchtst_reparam_mae_rmse": [
-      0.11513102799654007,
-      0.48324185609817505
+      0.24042710661888123,
+      0.6998072862625122
     ],
     "cvae_reparam_mae_rmse": [
-      0.14826694130897522,
-      0.4976522922515869
+      0.1482902318239212,
+      0.49758240580558777
     ],
     "patchtst_ohlc_mae_rmse": [
-      3.5796957492326,
-      4.6973235095607
+      1.8699754717319366,
+      3.051901475425888
     ],
     "cvae_ohlc_mae_rmse": [
-      3.1049627297287197,
-      4.188423817430327
+      3.1073303100716063,
+      4.1973553300986435
     ],
     "patchtst_volume_mae_rmse": [
-      2865898.5,
-      9654751.0
+      5802560.5,
+      6604227.0
     ],
     "cvae_volume_mae_rmse": [
-      2920405.75,
-      4313084.0
+      2921347.75,
+      4313321.5
     ],
     "patchtst_directional_accuracy": [
-      0.5160617438464747,
-      0.5219023779724656,
-      0.5452649144764289
+      0.5331664580725908,
+      0.5406758448060075,
+      0.4476428869420108
     ],
     "cvae_directional_accuracy": [
-      0.5189820609094702,
-      0.5356695869837297,
-      0.5148101793909053
+      0.5031289111389237,
+      0.538589904046725,
+      0.5152273675427618
     ],
     "cvae_avg_sample_variance": [
-      22.178799255389873,
-      15.89095052172665,
-      18.464382002138567
+      22.75699432159923,
+      15.629286681265697,
+      17.324706292903088
     ],
     "realized_close_variance": [
       1261.6776831754087,
@@ -46,114 +46,114 @@
       1257.3235809699966
     ],
     "cvae_spread_to_realized_ratio": [
-      0.01757881553359171,
-      0.012616887133541298,
-      0.01468546544549313
+      0.018037090316382624,
+      0.01240913473147378,
+      0.013779035528417808
     ],
     "backtest": {
       "note": "long-only bracket-order backtest: entry=close_0 (real). Each model's own predicted take-profit price is placed as a limit sell order at the same time as entry, with a mirrored 1:1 stop-loss the same price distance below entry (see mirrored_stop_loss). PatchTST's take-profit is the max of its predicted 3 horizon bars' own closes (single point forecast, no distribution to draw a quantile from -- see max_close_from_components); CVAE's is the p70 percentile of its K sampled draws' own predicted exit prices, since CVAE actually has a sampled distribution to pick a target from. A window is only ever eligible to trade if its own take-profit clears the buy price (2*buy_price-take_profit would put the mirrored stop-loss above entry otherwise, which makes no sense for a long) -- confidence alone can't override this. The 3 REAL horizon bars are then walked in order (see bracket_order_exit): whichever level is touched first ends the trade there; if a bar's range spans both, the stop-loss is assumed to trigger first (pessimistic tie-break, since OHLC bars don't record intrabar order); if neither is ever touched, the position is force-closed at the 3rd REAL bar's close (order expiry). total_return is summed across selected trades -- test windows are independently sampled and can overlap in calendar time, so this is not a sequential equity curve.",
       "patchtst": [
         {
           "threshold": 0.5,
-          "n_trades": 803,
-          "selectivity": 0.3350020859407593,
-          "win_rate": 0.5143212951432129,
-          "avg_return": -6.828138866875586e-05,
-          "total_return": -0.05482995510101096,
-          "take_profit_rate": 0.26525529265255293,
-          "stop_loss_rate": 0.29638854296388545
+          "n_trades": 0,
+          "selectivity": 0.0,
+          "win_rate": null,
+          "avg_return": null,
+          "total_return": null,
+          "take_profit_rate": null,
+          "stop_loss_rate": null
         },
         {
           "threshold": 0.6,
-          "n_trades": 643,
-          "selectivity": 0.2682519816437213,
-          "win_rate": 0.5132192846034215,
-          "avg_return": -0.00013491794073006727,
-          "total_return": -0.08675223588943326,
-          "take_profit_rate": 0.24416796267496113,
-          "stop_loss_rate": 0.2892690513219285
+          "n_trades": 0,
+          "selectivity": 0.0,
+          "win_rate": null,
+          "avg_return": null,
+          "total_return": null,
+          "take_profit_rate": null,
+          "stop_loss_rate": null
         },
         {
           "threshold": 0.7,
-          "n_trades": 482,
-          "selectivity": 0.20108468919482686,
-          "win_rate": 0.5,
-          "avg_return": -0.00021866483312424644,
-          "total_return": -0.10539644956588679,
-          "take_profit_rate": 0.1950207468879668,
-          "stop_loss_rate": 0.2946058091286307
+          "n_trades": 0,
+          "selectivity": 0.0,
+          "win_rate": null,
+          "avg_return": null,
+          "total_return": null,
+          "take_profit_rate": null,
+          "stop_loss_rate": null
         },
         {
           "threshold": 0.8,
-          "n_trades": 322,
-          "selectivity": 0.1343345848977889,
-          "win_rate": 0.5062111801242236,
-          "avg_return": -0.0002686396148634229,
-          "total_return": -0.08650195598602217,
-          "take_profit_rate": 0.17701863354037267,
-          "stop_loss_rate": 0.2857142857142857
+          "n_trades": 0,
+          "selectivity": 0.0,
+          "win_rate": null,
+          "avg_return": null,
+          "total_return": null,
+          "take_profit_rate": null,
+          "stop_loss_rate": null
         },
         {
           "threshold": 0.9,
-          "n_trades": 161,
-          "selectivity": 0.06716729244889445,
-          "win_rate": 0.4720496894409938,
-          "avg_return": -0.0008005251795608812,
-          "total_return": -0.12888455390930187,
-          "take_profit_rate": 0.12422360248447205,
-          "stop_loss_rate": 0.2795031055900621
+          "n_trades": 0,
+          "selectivity": 0.0,
+          "win_rate": null,
+          "avg_return": null,
+          "total_return": null,
+          "take_profit_rate": null,
+          "stop_loss_rate": null
         }
       ],
       "cvae": [
         {
           "threshold": 0.5,
-          "n_trades": 2190,
-          "selectivity": 0.9136420525657072,
-          "win_rate": 0.5191780821917809,
-          "avg_return": 7.566354771908803e-05,
-          "total_return": 0.1657031695048028,
-          "take_profit_rate": 0.2091324200913242,
-          "stop_loss_rate": 0.2502283105022831
+          "n_trades": 2196,
+          "selectivity": 0.9161451814768461,
+          "win_rate": 0.5286885245901639,
+          "avg_return": 4.528939235406112e-05,
+          "total_return": 0.09945550560951821,
+          "take_profit_rate": 0.22176684881602915,
+          "stop_loss_rate": 0.24408014571949
         },
         {
           "threshold": 0.6,
-          "n_trades": 2190,
-          "selectivity": 0.9136420525657072,
-          "win_rate": 0.5191780821917809,
-          "avg_return": 7.566354771908803e-05,
-          "total_return": 0.1657031695048028,
-          "take_profit_rate": 0.2091324200913242,
-          "stop_loss_rate": 0.2502283105022831
+          "n_trades": 2196,
+          "selectivity": 0.9161451814768461,
+          "win_rate": 0.5286885245901639,
+          "avg_return": 4.528939235406112e-05,
+          "total_return": 0.09945550560951821,
+          "take_profit_rate": 0.22176684881602915,
+          "stop_loss_rate": 0.24408014571949
         },
         {
           "threshold": 0.7,
-          "n_trades": 1747,
-          "selectivity": 0.7288277012932832,
-          "win_rate": 0.529479107040641,
-          "avg_return": 4.206611168018519e-05,
-          "total_return": 0.07348949710528352,
-          "take_profit_rate": 0.19805380652547225,
-          "stop_loss_rate": 0.2180881511161992
+          "n_trades": 1738,
+          "selectivity": 0.7250730079265749,
+          "win_rate": 0.5270425776754891,
+          "avg_return": -1.789159161128799e-05,
+          "total_return": -0.031095586220418525,
+          "take_profit_rate": 0.19390103567318756,
+          "stop_loss_rate": 0.2238204833141542
         },
         {
           "threshold": 0.8,
-          "n_trades": 1747,
-          "selectivity": 0.7288277012932832,
-          "win_rate": 0.529479107040641,
-          "avg_return": 4.206611168018519e-05,
-          "total_return": 0.07348949710528352,
-          "take_profit_rate": 0.19805380652547225,
-          "stop_loss_rate": 0.2180881511161992
+          "n_trades": 1738,
+          "selectivity": 0.7250730079265749,
+          "win_rate": 0.5270425776754891,
+          "avg_return": -1.789159161128799e-05,
+          "total_return": -0.031095586220418525,
+          "take_profit_rate": 0.19390103567318756,
+          "stop_loss_rate": 0.2238204833141542
         },
         {
           "threshold": 0.9,
-          "n_trades": 912,
-          "selectivity": 0.3804755944931164,
-          "win_rate": 0.5416666666666666,
-          "avg_return": 0.00012907073642427086,
-          "total_return": 0.11771251161893503,
-          "take_profit_rate": 0.18092105263157895,
-          "stop_loss_rate": 0.20833333333333334
+          "n_trades": 905,
+          "selectivity": 0.37755527743012096,
+          "win_rate": 0.5425414364640884,
+          "avg_return": 0.000179481354866241,
+          "total_return": 0.1624306261539481,
+          "take_profit_rate": 0.18232044198895028,
+          "stop_loss_rate": 0.2022099447513812
         }
       ],
       "buy_and_hold": {
@@ -186,43 +186,43 @@
   "long": {
     "n_windows": 2397,
     "patchtst_reparam_mae_rmse": [
-      0.11513102799654007,
-      0.48324185609817505
+      0.24042710661888123,
+      0.6998072862625122
     ],
     "cvae_reparam_mae_rmse": [
-      0.14826694130897522,
-      0.4976522922515869
+      0.1482902318239212,
+      0.49758240580558777
     ],
     "patchtst_ohlc_mae_rmse": [
-      3.5796957492326,
-      4.6973235095607
+      1.8699754717319366,
+      3.051901475425888
     ],
     "cvae_ohlc_mae_rmse": [
-      3.1049627297287197,
-      4.188423817430327
+      3.1073303100716063,
+      4.1973553300986435
     ],
     "patchtst_volume_mae_rmse": [
-      2865898.5,
-      9654751.0
+      5802560.5,
+      6604227.0
     ],
     "cvae_volume_mae_rmse": [
-      2920405.75,
-      4313084.0
+      2921347.75,
+      4313321.5
     ],
     "patchtst_directional_accuracy": [
-      0.5160617438464747,
-      0.5219023779724656,
-      0.5452649144764289
+      0.5331664580725908,
+      0.5406758448060075,
+      0.4476428869420108
     ],
     "cvae_directional_accuracy": [
-      0.5189820609094702,
-      0.5356695869837297,
-      0.5148101793909053
+      0.5031289111389237,
+      0.538589904046725,
+      0.5152273675427618
     ],
     "cvae_avg_sample_variance": [
-      22.178799255389873,
-      15.89095052172665,
-      18.464382002138567
+      22.75699432159923,
+      15.629286681265697,
+      17.324706292903088
     ],
     "realized_close_variance": [
       1261.6776831754087,
@@ -230,114 +230,114 @@
       1257.3235809699966
     ],
     "cvae_spread_to_realized_ratio": [
-      0.01757881553359171,
-      0.012616887133541298,
-      0.01468546544549313
+      0.018037090316382624,
+      0.01240913473147378,
+      0.013779035528417808
     ],
     "backtest": {
       "note": "long-only bracket-order backtest: entry=close_0 (real). Each model's own predicted take-profit price is placed as a limit sell order at the same time as entry, with a mirrored 1:1 stop-loss the same price distance below entry (see mirrored_stop_loss). PatchTST's take-profit is the max of its predicted 3 horizon bars' own closes (single point forecast, no distribution to draw a quantile from -- see max_close_from_components); CVAE's is the p70 percentile of its K sampled draws' own predicted exit prices, since CVAE actually has a sampled distribution to pick a target from. A window is only ever eligible to trade if its own take-profit clears the buy price (2*buy_price-take_profit would put the mirrored stop-loss above entry otherwise, which makes no sense for a long) -- confidence alone can't override this. The 3 REAL horizon bars are then walked in order (see bracket_order_exit): whichever level is touched first ends the trade there; if a bar's range spans both, the stop-loss is assumed to trigger first (pessimistic tie-break, since OHLC bars don't record intrabar order); if neither is ever touched, the position is force-closed at the 3rd REAL bar's close (order expiry). total_return is summed across selected trades -- test windows are independently sampled and can overlap in calendar time, so this is not a sequential equity curve.",
       "patchtst": [
         {
           "threshold": 0.5,
-          "n_trades": 803,
-          "selectivity": 0.3350020859407593,
-          "win_rate": 0.5143212951432129,
-          "avg_return": -6.828138866875586e-05,
-          "total_return": -0.05482995510101096,
-          "take_profit_rate": 0.26525529265255293,
-          "stop_loss_rate": 0.29638854296388545
+          "n_trades": 0,
+          "selectivity": 0.0,
+          "win_rate": null,
+          "avg_return": null,
+          "total_return": null,
+          "take_profit_rate": null,
+          "stop_loss_rate": null
         },
         {
           "threshold": 0.6,
-          "n_trades": 643,
-          "selectivity": 0.2682519816437213,
-          "win_rate": 0.5132192846034215,
-          "avg_return": -0.00013491794073006727,
-          "total_return": -0.08675223588943326,
-          "take_profit_rate": 0.24416796267496113,
-          "stop_loss_rate": 0.2892690513219285
+          "n_trades": 0,
+          "selectivity": 0.0,
+          "win_rate": null,
+          "avg_return": null,
+          "total_return": null,
+          "take_profit_rate": null,
+          "stop_loss_rate": null
         },
         {
           "threshold": 0.7,
-          "n_trades": 482,
-          "selectivity": 0.20108468919482686,
-          "win_rate": 0.5,
-          "avg_return": -0.00021866483312424644,
-          "total_return": -0.10539644956588679,
-          "take_profit_rate": 0.1950207468879668,
-          "stop_loss_rate": 0.2946058091286307
+          "n_trades": 0,
+          "selectivity": 0.0,
+          "win_rate": null,
+          "avg_return": null,
+          "total_return": null,
+          "take_profit_rate": null,
+          "stop_loss_rate": null
         },
         {
           "threshold": 0.8,
-          "n_trades": 322,
-          "selectivity": 0.1343345848977889,
-          "win_rate": 0.5062111801242236,
-          "avg_return": -0.0002686396148634229,
-          "total_return": -0.08650195598602217,
-          "take_profit_rate": 0.17701863354037267,
-          "stop_loss_rate": 0.2857142857142857
+          "n_trades": 0,
+          "selectivity": 0.0,
+          "win_rate": null,
+          "avg_return": null,
+          "total_return": null,
+          "take_profit_rate": null,
+          "stop_loss_rate": null
         },
         {
           "threshold": 0.9,
-          "n_trades": 161,
-          "selectivity": 0.06716729244889445,
-          "win_rate": 0.4720496894409938,
-          "avg_return": -0.0008005251795608812,
-          "total_return": -0.12888455390930187,
-          "take_profit_rate": 0.12422360248447205,
-          "stop_loss_rate": 0.2795031055900621
+          "n_trades": 0,
+          "selectivity": 0.0,
+          "win_rate": null,
+          "avg_return": null,
+          "total_return": null,
+          "take_profit_rate": null,
+          "stop_loss_rate": null
         }
       ],
       "cvae": [
         {
           "threshold": 0.5,
-          "n_trades": 2190,
-          "selectivity": 0.9136420525657072,
-          "win_rate": 0.5191780821917809,
-          "avg_return": 7.566354771908803e-05,
-          "total_return": 0.1657031695048028,
-          "take_profit_rate": 0.2091324200913242,
-          "stop_loss_rate": 0.2502283105022831
+          "n_trades": 2196,
+          "selectivity": 0.9161451814768461,
+          "win_rate": 0.5286885245901639,
+          "avg_return": 4.528939235406112e-05,
+          "total_return": 0.09945550560951821,
+          "take_profit_rate": 0.22176684881602915,
+          "stop_loss_rate": 0.24408014571949
         },
         {
           "threshold": 0.6,
-          "n_trades": 2190,
-          "selectivity": 0.9136420525657072,
-          "win_rate": 0.5191780821917809,
-          "avg_return": 7.566354771908803e-05,
-          "total_return": 0.1657031695048028,
-          "take_profit_rate": 0.2091324200913242,
-          "stop_loss_rate": 0.2502283105022831
+          "n_trades": 2196,
+          "selectivity": 0.9161451814768461,
+          "win_rate": 0.5286885245901639,
+          "avg_return": 4.528939235406112e-05,
+          "total_return": 0.09945550560951821,
+          "take_profit_rate": 0.22176684881602915,
+          "stop_loss_rate": 0.24408014571949
         },
         {
           "threshold": 0.7,
-          "n_trades": 1747,
-          "selectivity": 0.7288277012932832,
-          "win_rate": 0.529479107040641,
-          "avg_return": 4.206611168018519e-05,
-          "total_return": 0.07348949710528352,
-          "take_profit_rate": 0.19805380652547225,
-          "stop_loss_rate": 0.2180881511161992
+          "n_trades": 1738,
+          "selectivity": 0.7250730079265749,
+          "win_rate": 0.5270425776754891,
+          "avg_return": -1.789159161128799e-05,
+          "total_return": -0.031095586220418525,
+          "take_profit_rate": 0.19390103567318756,
+          "stop_loss_rate": 0.2238204833141542
         },
         {
           "threshold": 0.8,
-          "n_trades": 1747,
-          "selectivity": 0.7288277012932832,
-          "win_rate": 0.529479107040641,
-          "avg_return": 4.206611168018519e-05,
-          "total_return": 0.07348949710528352,
-          "take_profit_rate": 0.19805380652547225,
-          "stop_loss_rate": 0.2180881511161992
+          "n_trades": 1738,
+          "selectivity": 0.7250730079265749,
+          "win_rate": 0.5270425776754891,
+          "avg_return": -1.789159161128799e-05,
+          "total_return": -0.031095586220418525,
+          "take_profit_rate": 0.19390103567318756,
+          "stop_loss_rate": 0.2238204833141542
         },
         {
           "threshold": 0.9,
-          "n_trades": 912,
-          "selectivity": 0.3804755944931164,
-          "win_rate": 0.5416666666666666,
-          "avg_return": 0.00012907073642427086,
-          "total_return": 0.11771251161893503,
-          "take_profit_rate": 0.18092105263157895,
-          "stop_loss_rate": 0.20833333333333334
+          "n_trades": 905,
+          "selectivity": 0.37755527743012096,
+          "win_rate": 0.5425414364640884,
+          "avg_return": 0.000179481354866241,
+          "total_return": 0.1624306261539481,
+          "take_profit_rate": 0.18232044198895028,
+          "stop_loss_rate": 0.2022099447513812
         }
       ]
     }
