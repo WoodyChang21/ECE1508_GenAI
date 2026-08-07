@@ -169,7 +169,7 @@
       }
     }
   },
-  "short": {
+  "narrow": {
     "n_windows": 1002,
     "patchtst_reparam_mae_rmse": [
       0.20257937908172607,
@@ -330,7 +330,7 @@
       }
     }
   },
-  "medium": {
+  "moderate": {
     "n_windows": 999,
     "patchtst_reparam_mae_rmse": [
       0.21746788918972015,
@@ -491,7 +491,7 @@
       }
     }
   },
-  "long": {
+  "wide": {
     "n_windows": 999,
     "patchtst_reparam_mae_rmse": [
       0.22700098156929016,

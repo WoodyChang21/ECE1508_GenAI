@@ -48,7 +48,7 @@ from src.models.patchtst import PatchTST
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
 
-BUCKETS = ["short", "medium", "long"]
+BUCKETS = ["narrow", "moderate", "wide"]  # lookback-window size -- see context_bucket
 BACKTEST_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.9]
 
 
@@ -623,9 +623,11 @@ def render_panel(
 def make_plots(df, test_pairs, pt_y, cvae_y, close_0, pt_take_profit, cvae_take_profit, cvae_label, args):
     """Selects 8 illustrative windows from the full fixed test set -- one per (case,
     context-length) combination, choosing uniformly at random among the windows that
-    match, where case is one of CASE_LABELS and context-length is "short" or "long" (see
-    context_bucket; "medium" is skipped to keep a clean short-vs-long contrast). Cases
-    are categorized by CVAE's own trade outcome; PatchTST's panel on the same figure just
+    match, where case is one of CASE_LABELS and context-length is "narrow" or "wide" (see
+    context_bucket; "moderate" is skipped to keep a clean narrow-vs-wide contrast --
+    named to avoid colliding with "long"/"short" as trading directions elsewhere in this
+    doc, e.g. long-only, ENTER LONG). Cases are categorized by CVAE's own trade outcome;
+    PatchTST's panel on the same figure just
     shows whatever actually happened on that same window, uncontrolled, so the two
     models' contrasting behavior on identical real price action is visible side by side.
 
@@ -674,7 +676,7 @@ def make_plots(df, test_pairs, pt_y, cvae_y, close_0, pt_take_profit, cvae_take_
     records = []
     plotted = 0
     for case in CASE_LABELS:
-        for ctx_bucket_name in ("short", "long"):
+        for ctx_bucket_name in ("narrow", "wide"):
             candidates = np.where((cvae_label == case) & (ctx_bucket_arr == ctx_bucket_name))[0]
             if len(candidates) == 0:
                 logger.warning(

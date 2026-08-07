@@ -217,11 +217,14 @@ def extract_arrays(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray
 
 
 def context_bucket(ctx_bars: int) -> str:
+    """Buckets by lookback-window size -- named narrow/moderate/wide (not
+    short/medium/long) specifically to avoid colliding with "long"/"short" as trading
+    directions elsewhere in this project (long-only strategy, no short-selling)."""
     if ctx_bars <= 28:
-        return "short"
+        return "narrow"
     if ctx_bars <= 49:
-        return "medium"
-    return "long"
+        return "moderate"
+    return "wide"
 
 
 # ---------------------------------------------------------------------------
