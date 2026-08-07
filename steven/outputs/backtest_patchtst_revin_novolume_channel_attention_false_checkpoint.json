@@ -43,69 +43,39 @@
       "annual_return": -0.044101798997640995
     },
     "patchtst_revin": {
-      "n_decisions": 1468,
-      "n_trades": 740,
+      "n_decisions": 1379,
+      "n_trades": 868,
       "outcome_breakdown": {
-        "win_take_profit": 0.2683923705722071,
-        "win_expiry": 0.0667574931880109,
-        "lose_expiry": 0.16893732970027248,
-        "skipped": 0.4373297002724796,
-        "no_trade": 0.05858310626702997
+        "win_take_profit": 0.36258158085569253,
+        "win_expiry": 0.0725163161711385,
+        "lose_expiry": 0.19434372733865118,
+        "skipped": 0.3103698332124728,
+        "no_trade": 0.06018854242204496
       },
-      "total_return": 0.04004676116796113,
-      "win_rate": 0.6648648648648648,
-      "take_profit_rate": 0.5324324324324324,
-      "avg_return": 7.065054517976037e-05,
-      "avg_bars_held": 2.2554054054054054,
+      "total_return": 0.09615808896533484,
+      "win_rate": 0.6912442396313364,
+      "take_profit_rate": 0.576036866359447,
+      "avg_return": 0.00012137970848711645,
+      "avg_bars_held": 2.172811059907834,
       "entry_date": "2024-01-17",
       "entry_price": 471.5199890136719,
-      "exit_date": "2025-05-29",
-      "exit_price": 588.9231567382812,
-      "elapsed_years": 1.363791923340178,
-      "annual_return": 0.02921002683209606
+      "exit_date": "2025-05-30",
+      "exit_price": 588.2899780273438,
+      "elapsed_years": 1.3664156970111796,
+      "annual_return": 0.06950018926347967
     },
     "confidence_calibration": [
       {
-        "bin": "confidence == 0 (not coherent-up)",
-        "n": 142,
-        "win_rate": 0.4295774647887324,
-        "direction_accuracy": 0.44366197183098594,
-        "mean_confidence": 0.0
+        "bin": "coherent-up (confidence=1)",
+        "n": 1246,
+        "win_rate": 0.7335473515248796,
+        "direction_accuracy": 0.5634028892455859
       },
       {
-        "bin": "[0.00, 0.20]",
-        "n": 232,
-        "win_rate": 0.8577586206896551,
-        "direction_accuracy": 0.5732758620689655,
-        "mean_confidence": 0.10297511222554181
-      },
-      {
-        "bin": "[0.20, 0.40]",
-        "n": 229,
-        "win_rate": 0.7903930131004366,
-        "direction_accuracy": 0.5414847161572053,
-        "mean_confidence": 0.2978449961283011
-      },
-      {
-        "bin": "[0.40, 0.60]",
-        "n": 237,
-        "win_rate": 0.729957805907173,
-        "direction_accuracy": 0.5991561181434599,
-        "mean_confidence": 0.5029448537953471
-      },
-      {
-        "bin": "[0.60, 0.80]",
-        "n": 250,
-        "win_rate": 0.676,
-        "direction_accuracy": 0.544,
-        "mean_confidence": 0.7031828368990043
-      },
-      {
-        "bin": "[0.80, 1.00]",
-        "n": 378,
-        "win_rate": 0.6455026455026455,
-        "direction_accuracy": 0.5343915343915344,
-        "mean_confidence": 0.9169859415018943
+        "bin": "not coherent-up (confidence=0)",
+        "n": 133,
+        "win_rate": 0.40601503759398494,
+        "direction_accuracy": 0.42857142857142855
       }
     ]
   }
