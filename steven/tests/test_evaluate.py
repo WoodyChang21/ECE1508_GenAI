@@ -5,35 +5,6 @@ import pytest
 from src import evaluate as ev
 
 
-def _components(open_ret: float, body_ret: float) -> list:
-    """A single [open_ret, body_ret, upper_wick, lower_wick] row, wicks zeroed."""
-    return [open_ret, body_ret, 0.0, 0.0]
-
-
-def test_cvae_confidence_scores_consensus_and_chop():
-    close_0 = np.array([100.0, 100.0])
-    # window0: all 4 samples predict up -> confidence 1.0
-    # window1: 2 up, 2 down -> confidence 0.5
-    up = _components(0.01, 0.0)
-    down = _components(-0.01, 0.0)
-    samples = np.array(
-        [
-            [up, up],
-            [up, up],
-            [up, down],
-            [up, down],
-        ]
-    )  # (K=4, N=2, 4) -- need (K,N,3,4): broadcast same components across the 3 bars
-    price_samples = np.broadcast_to(samples[:, :, None, :], (4, 2, 3, 4))
-
-    confidence = ev.cvae_confidence_scores(price_samples, close_0)
-    np.testing.assert_allclose(confidence, [1.0, 0.5])
-
-
-def test_cvae_confidence_scores_empty():
-    assert ev.cvae_confidence_scores(np.empty((4, 0, 3, 4)), np.empty(0)).tolist() == []
-
-
 def _bar(open_, high, low, close):
     return [open_, high, low, close]
 

@@ -79,15 +79,6 @@ def parse_args() -> argparse.Namespace:
         "max_close_from_components).",
     )
     p.add_argument(
-        "--cvae-consensus-threshold", type=float, default=0.5,
-        help="Minimum fraction of CVAE's K sampled draws that must agree on an upward move for a "
-        "decision to pass CVAE's quality gate (see make_cvae_predict_fn). PatchTST has no analogous "
-        "threshold -- its gate is a plain boolean (do its 3 predicted bars agree on direction?), not "
-        "a score, so there's nothing to tune there. Fixed, not swept: this changes which decisions "
-        "actually get made along the way (trade vs. skip 1 bar), so a different value produces a "
-        "genuinely different simulated path, not just a different slice of the same one.",
-    )
-    p.add_argument(
         "--patchtst-min-return-threshold", type=float, default=0.001,
         help="Minimum PatchTST-predicted exit return (fraction, e.g. 0.001 = 0.1%%) required to bother "
         "trading at all, on top of the plain target>buy eligibility check -- filters out trades with "
@@ -114,21 +105,6 @@ def resolve_device(name: str) -> torch.device:
             return torch.device("mps")
         return torch.device("cpu")
     return torch.device(name)
-
-
-def cvae_confidence_scores(cvae_price_samples: np.ndarray, close_0: np.ndarray) -> np.ndarray:
-    """cvae_price_samples: (K,N,3,4). Returns (N,): fraction of the K sampled paths
-    whose predicted exit price comes out above close_0. ~1 = strong sample consensus on
-    an upward exit, ~0.5 = samples disagree (chop), ~0 = consensus downtrend -- one
-    score captures all three of the "don't trade this" cases at once. This is inherently
-    a per-window quantity -- no cross-window ranking needed -- so it works unmodified
-    whether called on a batch or one window (N=1) at a time. See make_cvae_predict_fn for
-    how this feeds into CVAE's quality gate (--cvae-consensus-threshold)."""
-    if cvae_price_samples.shape[1] == 0:
-        return np.empty(0)
-    exit_prices = exit_price_from_components(cvae_price_samples, close_0)  # (K, N)
-    sample_return = exit_prices / close_0[None, :] - 1.0
-    return (sample_return > 0).mean(axis=0)
 
 
 def take_profit_exit(
@@ -188,9 +164,9 @@ def classify_walk_forward_decision(
     (label, would_trade) -- would_trade is eligible AND meets_return_threshold AND
     passes_quality_gate, and is exactly the condition run_walk_forward uses to decide
     whether to actually place the trade (and therefore lock out the next HORIZON bars).
-    passes_quality_gate is model-specific (PatchTST: boolean coherence; CVAE: its own
-    consensus threshold -- see make_patchtst_predict_fn/make_cvae_predict_fn), fed in
-    generically here since this function doesn't care which model produced it.
+    passes_quality_gate is model-specific (PatchTST: boolean coherence; CVAE: always True
+    -- see the module note above run_walk_forward for why CVAE has no gate at all anymore),
+    fed in generically here since this function doesn't care which model produced it.
 
     Two distinct reasons never make it to a trade: 'no_trade' (this model's own take-profit
     target never even clears the buy price -- no expected upside at all, the quality gate
@@ -326,10 +302,16 @@ def naive_periodic_benchmark(df: pd.DataFrame, closes: np.ndarray, t0: int, test
 # cross-model "confidence" score anymore. An earlier version squeezed PatchTST's and
 # CVAE's very different notions of confidence onto the same 0-1 scale and applied one
 # shared threshold to both, which implied a comparability neither model actually had.
-# Each model instead gets its own independently-named, independently-thresholded "quality
-# gate": PatchTST's is a plain boolean (do its 3 predicted bars agree on direction?) with
-# no history dependence and nothing to tune; CVAE's is its sample-consensus fraction,
-# thresholded by its own --cvae-consensus-threshold. Likewise min_return_threshold is now
+# PatchTST kept a plain boolean quality gate (do its 3 predicted bars agree on
+# direction?) -- no history dependence, nothing to tune. CVAE's sample-consensus
+# fraction was tried as its own independently-thresholded gate, then DROPPED entirely
+# after direct A/B testing showed it wasn't just noisy but actively net-harmful: bucketing
+# real trades by consensus level found the *unanimous* (5/5 samples agree) bucket was the
+# worst-performing one, not the best, and winners/losers had statistically indistinguishable
+# consensus distributions. Removing the gate outright (keep only eligibility + return
+# threshold) outperformed every consensus-threshold value tried, including the gate's
+# original default -- see backlog.md for the full numbers. CVAE's quality gate is now
+# always True; only the return-size and eligibility checks apply. min_return_threshold is
 # per-model (--patchtst-min-return-threshold / --cvae-min-return-threshold, see main()):
 # a shared absolute threshold silently zeroed out CVAE's trades entirely after the
 # posterior-collapse retrain shifted its predicted-edge scale far below PatchTST's (see
@@ -364,7 +346,6 @@ def make_patchtst_predict_fn(patchtst, device: torch.device, sell_bound: float):
 
 def make_cvae_predict_fn(
     cvae, device: torch.device, sell_bound: float, num_samples: int, cvae_sell_quantile: float,
-    consensus_threshold: float,
 ):
     """Returns a predict(w) -> {take_profit, passes_quality_gate, price} closure,
     single-window (batch=1) at a time. `price` is whichever of the K sampled draws' own
@@ -373,8 +354,11 @@ def make_cvae_predict_fn(
     draws this decision consumed, so later re-rendering it in make_plots never risks a
     different (freshly re-sampled) set of draws implying a different target/outcome than
     the one that actually decided this window's case label. `passes_quality_gate` is
-    CVAE's own sample-consensus fraction (see cvae_confidence_scores) cleared against its
-    own dedicated threshold -- not comparable to PatchTST's boolean gate, deliberately."""
+    always True: CVAE's sample-consensus fraction was tried here as its own thresholded
+    gate and then removed after direct A/B testing found it net-harmful, not just
+    unreliable -- see the module note above run_walk_forward and backlog.md's "trade
+    confidence" entry for the numbers. Eligibility and the return-size threshold alone
+    decide whether a CVAE window trades."""
 
     def predict(w: dict) -> dict:
         masked_t = torch.from_numpy(w["masked_tensor"])[None].to(device)
@@ -384,11 +368,10 @@ def make_cvae_predict_fn(
         close_0 = np.array([w["close_0"]])
         exit_prices = exit_price_from_components(cvae_price, close_0)  # (K,1)
         take_profit = float(np.percentile(exit_prices[:, 0], cvae_sell_quantile))
-        consensus = float(cvae_confidence_scores(cvae_price, close_0)[0])
         draw_idx = nearest_draw_index(exit_prices[:, 0], take_profit)
         return {
             "take_profit": take_profit,
-            "passes_quality_gate": consensus >= consensus_threshold,
+            "passes_quality_gate": True,
             "price": cvae_price[draw_idx, 0],
         }
 
@@ -822,14 +805,12 @@ def main() -> None:
 
     logger.info(
         "running walk-forward backtest (ctx=%d bars, patchtst_min_return>=%.3f%%, "
-        "cvae_min_return>=%.3f%%, cvae_consensus>=%.2f, %d..%d)...",
+        "cvae_min_return>=%.3f%% [no CVAE quality gate -- see backlog.md], %d..%d)...",
         WALK_FORWARD_CTX_BARS, args.patchtst_min_return_threshold * 100,
-        args.cvae_min_return_threshold * 100, args.cvae_consensus_threshold, test_lo, test_hi,
+        args.cvae_min_return_threshold * 100, test_lo, test_hi,
     )
     pt_predict = make_patchtst_predict_fn(patchtst, device, sell_bound)
-    cvae_predict = make_cvae_predict_fn(
-        cvae, device, sell_bound, args.num_samples, args.cvae_sell_quantile, args.cvae_consensus_threshold
-    )
+    cvae_predict = make_cvae_predict_fn(cvae, device, sell_bound, args.num_samples, args.cvae_sell_quantile)
     pt_wf = run_walk_forward(pt_predict, feat, opens, closes, test_lo, test_hi, args.patchtst_min_return_threshold)
     cvae_wf = run_walk_forward(cvae_predict, feat, opens, closes, test_lo, test_hi, args.cvae_min_return_threshold)
     logger.info(
@@ -840,7 +821,6 @@ def main() -> None:
     results = {
         "walk_forward": {
             "ctx_bars": WALK_FORWARD_CTX_BARS,
-            "cvae_consensus_threshold": args.cvae_consensus_threshold,
             "patchtst_min_return_threshold": args.patchtst_min_return_threshold,
             "cvae_min_return_threshold": args.cvae_min_return_threshold,
             "buy_and_hold": buy_and_hold_benchmark(df, wf_entry_idx, test_hi - 1),

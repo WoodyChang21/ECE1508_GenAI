@@ -166,6 +166,81 @@ up or down beyond "on." A single "how selective is each model's own gate" headli
 awkward as a result. Considered acceptable since the two gates were never really comparable under the old
 design either -- this redesign is honest about that instead of implying otherwise via a shared 0-1 scale.
 
+**Update (2026-08-07): CVAE's gate turned out not just unreliable but actively harmful, and was removed
+entirely.** The paragraph above ("why not drop the model-specific gate entirely") argued CVAE's sample
+agreement was too valuable to give up without testing -- so it got tested directly, and the case for
+keeping it didn't survive contact with the data:
+- Bucketing CVAE's real trades by consensus level found *unanimous* (5/5 samples agree) was the
+  **worst**-performing bucket (84.8% win rate, avg return -0.018%), not the best -- backwards from what
+  "confidence" is supposed to mean. `[0.6, 0.8, 1.0]` were the only achievable levels at `k=5` (consensus
+  is a coarse 6-value statistic at this sample count), and none of them showed a clean "higher = better"
+  relationship.
+- Winners and losers had statistically indistinguishable consensus distributions (mean 0.746 vs. 0.750,
+  identical median 0.8; 10% of losing trades happened at full unanimous agreement). Consensus could not
+  tell, in advance, which trades were about to go bad.
+- Directly A/B tested on the same checkpoint: removing the gate entirely (keep only eligibility + the
+  per-model return threshold) took CVAE from 663 trades / 86.7% win rate / **-1.67%** total return to 697
+  trades / **89.0%** win rate / **+8.60%** total return. Win rate went *up*, not down, when the gate was
+  removed -- the ~34 additional decisions it had been excluding (0/5, 1/5, or 2/5 agreement) were good
+  trades on average, not bad ones.
+
+CVAE's quality gate (`passes_quality_gate` in `make_cvae_predict_fn`) is now always `True` --
+`cvae_confidence_scores` was deleted along with `--cvae-consensus-threshold`. Only eligibility and
+`--cvae-min-return-threshold` decide whether a CVAE window trades. PatchTST keeps its boolean coherence
+gate -- that one hasn't been tested for the same failure mode, and is a different kind of check (a
+hard consistency constraint on the prediction itself, not a soft agreement-based confidence score), so
+there's less a priori reason to suspect it has the same problem, but it's untested, not proven safe.
+
+**This doesn't necessarily kill the "generative uncertainty as an edge" thesis, just this specific
+implementation of it.** `k=5` produces only 6 distinct consensus values -- a very coarse instrument to
+expect real discriminating power out of. Before concluding CVAE's sample-level uncertainty carries no
+usable signal at all, worth trying a much larger `--num-samples` (e.g. 15-25) to get a finer-grained
+consensus score and re-running the same bucket/A-B analysis -- if it's still flat/inverted at higher *k*,
+that's much stronger evidence the signal genuinely isn't there (rather than just being too coarse to see).
+
+**Also tested and NOT adopted**: swapping CVAE's take-profit formula from `exit_price_from_components`
+(mean of the 3 bars' 6 open/close values) to `max_close_from_components` (PatchTST's more aggressive
+max-of-3-closes) -- bigger individual wins (+0.114% vs. +0.075% avg) but a lower take-profit rate (80.8%
+vs. 86.4%) pushes more trades to expiry, netting worse overall (+3.03% with the gate / +6.95% without it,
+both below the mean-target-no-gate result above). The mean-based target plus no gate is the best
+configuration found so far. Caveat that applies to every number in this section: all tested against one
+checkpoint over one fixed test period -- real risk of overfitting to this specific window given how many
+configurations have now been tried against it.
+
+## Fixed, volatility-calibrated stop-loss -- explored ad hoc, not implemented
+
+**Motivation**: after finding CVAE's win rate and take-profit rate were both high but total return was
+still negative (663 trades, 86.7% win rate, 86.4% take-profit rate, -1.67% total return -- see the "trade
+confidence" entry above for the baseline this was measured against, before the gate was removed), the
+working theory was a small number of large losing trades dragging the average down, not the win/loss split
+itself. A hard stop-loss was tried as a mitigation, distinct from the mirrored 1:1 stop-loss already
+covered in `v1.md`'s "why there's no stop-loss" section (that one was sized *off the take-profit target*
+and found to backfire by triggering on ordinary intrabar noise; this one is sized as a fixed level, off the
+instrument's own volatility, independent of whatever the take-profit happens to be).
+
+**Calibration**: rather than pick a stop level arbitrarily, it was checked against `train_exit_return_bound`
+-- the empirical p99 of `|anchored log return|` over the training data (~1.9%) -- as a sanity bound for
+what a "big" 3-bar move actually looks like for hourly SPY. A 2% stop sits just outside that p99, i.e. it
+should trigger on genuine tail moves, not on everyday noise.
+
+**Result (tested against the then-current gated 663-trade CVAE baseline, pessimistic same-bar tie-break --
+stop wins over take-profit on same-bar overlap)**:
+- 2% stop-loss: total return improved from -1.67% to -0.37%. Directionally consistent with the "a few big
+  losses are dragging the average down" theory.
+- 1% and 0.5% stops: both backfired badly (-5.37% and -15.41% respectively) -- tight enough to trigger
+  routinely on ordinary intrabar noise rather than only on genuine adverse moves, the same failure mode
+  that killed the mirrored 1:1 version.
+
+**Status: not implemented in the shipped backtest, and not re-tested since.** This was run via an ad hoc
+diagnostic script, before CVAE's quality gate was found net-harmful and removed (see the "trade confidence"
+entry above). Removing that gate alone already flipped CVAE's total return from -1.67% to +8.60% without
+any stop-loss at all, which somewhat reduces the urgency here -- but the underlying tail-risk concern (some
+single trade losing several percent) is orthogonal to the gate question and could still matter in a
+different sample or period. Before adopting a 2% (or any) fixed stop as part of the real strategy: re-run
+this same 2%/1%/0.5% sweep against the current no-gate baseline to confirm the finding still holds, then
+implement it as an actual bracket order in `take_profit_exit()` (or a sibling function) rather than a
+one-off script, with its own test coverage.
+
 ## Middle-masking ablation
 
 Deployment always masks the rightmost 3 bars, and v1 trains that way too. Open question
