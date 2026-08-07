@@ -222,3 +222,6 @@ __marimo__/
 
 # macOS
 .DS_Store
+
+# Personal local tooling, not shared with the team
+steven/export_md_to_html.py
