@@ -121,52 +121,36 @@ def test_run_backtest_empty_windows():
     assert result["cvae"] == []
 
 
-def test_mirrored_stop_loss_symmetric_gap():
-    assert ev.mirrored_stop_loss(100.0, 105.0) == pytest.approx(95.0)
-    np.testing.assert_allclose(
-        ev.mirrored_stop_loss(np.array([100.0, 50.0]), np.array([105.0, 55.0])), [95.0, 45.0]
-    )
-
-
 def _bar(open_, high, low, close):
     return [open_, high, low, close]
 
 
-def test_bracket_order_exit_scenarios():
-    """buy=100, take_profit=105, stop_loss=95 (mirrored 1:1) for every row.
-    row0: take-profit touched at bar0 only.
-    row1: stop-loss touched at bar0 only.
-    row2: both levels touched within the same bar0 -> pessimistic tie-break, stop-loss wins.
-    row3: neither level ever touched -> expiry at bar2's real close.
-    row4: take-profit only touched at bar2 (confirms the sequential, not "any bar", walk).
-    row5: take-profit resolved at bar0; bar1 would touch stop-loss but must NOT flip the
-    already-resolved outcome.
+def test_take_profit_exit_scenarios():
+    """take_profit=105 for every row.
+    row0: touched at bar0 only.
+    row1: never touched -> expiry at bar2's real close.
+    row2: touched only at bar2 (confirms the sequential, not "any bar", walk).
+    row3: touched at bar0; bar1's range must NOT flip the already-resolved outcome.
     """
     true_ohlc = np.array([
         [_bar(101, 106, 100, 104), _bar(100, 101, 99, 100), _bar(100, 101, 99, 100)],  # row0
-        [_bar(99, 100, 94, 96), _bar(100, 101, 99, 100), _bar(100, 101, 99, 100)],  # row1
-        [_bar(100, 110, 90, 100), _bar(100, 101, 99, 100), _bar(100, 101, 99, 100)],  # row2
-        [_bar(100, 102, 98, 101), _bar(101, 103, 99, 102), _bar(102, 104, 100, 103)],  # row3
-        [_bar(100, 102, 99, 101), _bar(101, 103, 100, 102), _bar(102, 106, 101, 104)],  # row4
-        [_bar(101, 106, 100, 104), _bar(90, 96, 85, 92), _bar(100, 101, 99, 100)],  # row5
+        [_bar(100, 102, 98, 101), _bar(101, 103, 99, 102), _bar(102, 104, 100, 103)],  # row1
+        [_bar(100, 102, 99, 101), _bar(101, 103, 100, 102), _bar(102, 106, 101, 104)],  # row2
+        [_bar(101, 106, 100, 104), _bar(90, 110, 85, 92), _bar(100, 101, 99, 100)],  # row3
     ])
-    take_profit = np.full(6, 105.0)
-    stop_loss = np.full(6, 95.0)
+    take_profit = np.full(4, 105.0)
 
-    sell_price, hit_tp, hit_sl = ev.bracket_order_exit(true_ohlc, take_profit, stop_loss)
+    sell_price, hit_tp = ev.take_profit_exit(true_ohlc, take_profit)
 
-    np.testing.assert_allclose(sell_price, [105.0, 95.0, 95.0, 103.0, 105.0, 105.0])
-    np.testing.assert_array_equal(hit_tp, [True, False, False, False, True, True])
-    np.testing.assert_array_equal(hit_sl, [False, True, True, False, False, False])
+    np.testing.assert_allclose(sell_price, [105.0, 103.0, 105.0, 105.0])
+    np.testing.assert_array_equal(hit_tp, [True, False, True, True])
 
 
-def test_sweep_thresholds_reports_take_profit_and_stop_loss_rates():
+def test_sweep_thresholds_reports_take_profit_rate():
     confidence = np.array([0.9, 0.9, 0.9, 0.9])
     trade_return = np.array([0.05, -0.05, 0.05, -0.05])
     hit_tp = np.array([True, False, False, False])
-    hit_sl = np.array([False, True, False, True])
 
-    rows = ev.sweep_thresholds(confidence, trade_return, [0.5], hit_tp, hit_sl)
+    rows = ev.sweep_thresholds(confidence, trade_return, [0.5], hit_tp)
 
     assert rows[0]["take_profit_rate"] == pytest.approx(0.25)
-    assert rows[0]["stop_loss_rate"] == pytest.approx(0.5)

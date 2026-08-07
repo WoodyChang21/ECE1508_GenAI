@@ -62,11 +62,11 @@ def candle_oc(candle: list[float]) -> str:
     return f"{candle[0]:.2f} / {candle[3]:.2f}"
 
 
-OUTCOME_LABEL = {"take_profit": "TAKE PROFIT", "stop_loss": "STOP LOSS", "expired": "EXPIRED"}
+OUTCOME_LABEL = {"take_profit": "TAKE PROFIT", "expired": "EXPIRED"}
 
 
 def vs_real_cell(model: dict) -> str:
-    """No trade was entered, so there's no bracket order to have resolved."""
+    """No trade was entered, so there's no take-profit order to have resolved."""
     if not model["would_enter"]:
         return "—"
     status = f"**{OUTCOME_LABEL[model['outcome']]}**"
@@ -96,16 +96,16 @@ def sample_section(s: dict) -> str:
         f"![sample{s['index']}](outputs/sample_plots/{s['file']})",
         "",
         "| | Candle 1 (open / close) | Candle 2 (open / close) | Candle 3 (open / close) | "
-        "Buy price | Take-profit | Stop-loss | Trade? | vs. real price |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "Buy price | Take-profit | Trade? | vs. real price |",
+        "|---|---|---|---|---|---|---|---|",
         f"| Ground truth | {candle_oc(gt['candles'][0])} | {candle_oc(gt['candles'][1])} | "
-        f"{candle_oc(gt['candles'][2])} | {buy:.2f} | — | — | — | "
+        f"{candle_oc(gt['candles'][2])} | {buy:.2f} | — | — | "
         f"{ground_truth_vs_real_cell(gt, buy)} |",
         f"| PatchTST | {candle_oc(pt['candles'][0])} | {candle_oc(pt['candles'][1])} | "
-        f"{candle_oc(pt['candles'][2])} | {buy:.2f} | {pt['sell_limit']:.2f} | {pt['stop_loss']:.2f} | "
+        f"{candle_oc(pt['candles'][2])} | {buy:.2f} | {pt['sell_limit']:.2f} | "
         f"{trade_decision_cell(pt)} | {vs_real_cell(pt)} |",
         f"| CVAE | {candle_oc(cvae['candles'][0])} | {candle_oc(cvae['candles'][1])} | "
-        f"{candle_oc(cvae['candles'][2])} | {buy:.2f} | {cvae['sell_limit']:.2f} | {cvae['stop_loss']:.2f} | "
+        f"{candle_oc(cvae['candles'][2])} | {buy:.2f} | {cvae['sell_limit']:.2f} | "
         f"{trade_decision_cell(cvae)} | {vs_real_cell(cvae)} |",
     ])
 
@@ -116,7 +116,7 @@ def results_samples_block(samples: list[dict]) -> str:
 
 def hit_status(model: dict) -> str:
     """NO TRADE takes priority over the outcome -- a model whose own target sits below
-    buy never has a bracket order placed in the first place, so how it would have
+    buy never has a take-profit order placed in the first place, so how it would have
     resolved is moot."""
     if not model["would_enter"]:
         return "NO TRADE"
@@ -142,10 +142,10 @@ def spread_summary_block(samples: list[dict]) -> str:
 
 def backtest_row(row: dict) -> str:
     if row["win_rate"] is None:
-        return f"| {row['threshold']} | {row['n_trades']} | — | — | — | — | — |"
+        return f"| {row['threshold']} | {row['n_trades']} | — | — | — | — |"
     return (
         f"| {row['threshold']} | {row['n_trades']} | {fmt_plain_pct(row['win_rate'], 1)} | "
-        f"{fmt_plain_pct(row['take_profit_rate'], 1)} | {fmt_plain_pct(row['stop_loss_rate'], 1)} | "
+        f"{fmt_plain_pct(row['take_profit_rate'], 1)} | "
         f"{fmt_signed_pct_fraction(row['avg_return'], 3)} | {fmt_signed_pct_fraction(row['total_return'], 2)} |"
     )
 
@@ -163,10 +163,10 @@ def buy_hold_block(bh: dict) -> str:
 
 def backtest_table(rows: list[dict]) -> str:
     header = (
-        "| Confidence threshold | Trades taken | Win rate | Take-profit rate | Stop-loss rate | "
+        "| Confidence threshold | Trades taken | Win rate | Take-profit rate | "
         "Avg. return per trade | Total return |"
     )
-    sep = "|---|---|---|---|---|---|---|"
+    sep = "|---|---|---|---|---|---|"
     return "\n".join([header, sep] + [backtest_row(r) for r in rows])
 
 
