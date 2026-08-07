@@ -234,3 +234,50 @@ directional loss needed) remains the better path forward.
 **Caveats**: one seed each; `DIR_LOSS_SCALE=1.0` also untuned and not isolated from
 `DIR_LOSS_WEIGHT` in this single run -- a 2D sweep (not just weight) may be needed; no
 backtest run (still below-chance direction).
+
+## hf_patchtst_revin_ohlc_global_volume_dirloss -- weight sweep
+
+**What**: The recommended follow-up above -- `DIR_LOSS_WEIGHT` swept over `[0.5, 1.0, 3.0]`
+(30x the original 0.1), crossed with both `channel_attention` settings, 6 runs total.
+`DIR_LOSS_SCALE` held fixed at `1.0`. Same code/architecture otherwise.
+Notebook: `steven/train_patchtst_hf_channel_attention.ipynb`.
+
+| Weight | `channel_attention` | OHLC RMSE ($) | Dir Acc (bar 1/2/3) | Coherence |
+|---|---|---|---|---|
+| 0.5 | False | 3.21 | 0.472 / 0.468 / 0.473 | 0.809 |
+| 0.5 | True | 4.01 | 0.464 / 0.461 / 0.451 | **0.951** |
+| 1.0 | False | 3.38 | 0.466 / 0.458 / 0.457 | 0.867 |
+| 1.0 | True | 4.05 | 0.462 / 0.461 / 0.454 | 0.950 |
+| 3.0 | False | 3.34 | 0.469 / 0.470 / 0.456 | 0.881 |
+| 3.0 | True | 3.71 | 0.464 / 0.457 / 0.462 | 0.882 |
+
+**Conclusion: decisive negative result -- the directional-loss mechanism, as implemented,
+does not work here at any weight tried.** Directional accuracy never crosses back above
+0.50 across all 6 runs (0.451-0.473, no upward trend as weight increases 30x) -- this rules
+out "weight=0.1 was just too small," not merely fails to confirm it. Worse, OHLC RMSE gets
+meaningfully *worse* at every swept weight compared to the no-directional-loss baseline
+(3.12-3.24): up to 3.21-4.05 depending on weight/setting, non-monotonically. So increasing
+the directional term's weight bought nothing on direction while actively costing point
+accuracy -- a strictly worse tradeoff at higher weights, not a partial win.
+
+**Most striking finding: `channel_attention=True` at weight 0.5-1.0 is simultaneously the
+*most* coherent result on this branch (0.95, tied with `hf_patchtst_revin_no_volume`'s 0.99)
+and confidently wrong (dir acc 0.45-0.46, the lowest on the branch)** -- the directional
+loss term, instead of correcting the wrong-sign bias, appears to have made the model even
+more consistently committed to it. This is a clean illustration of exactly the "confidently
+wrong" failure mode discussed earlier: coherence measures self-consistency, not
+correctness, and this run pushed self-consistency up while correctness stayed down.
+
+**Implication: this specific mechanism (soft sign-agreement loss added to RevIN MSE, on
+the volume-included variant) is not the fix.** Two paths remain, in priority order: (1)
+`DIR_LOSS_SCALE` sweep, per the earlier caveat -- untested, and a poorly-scaled return
+product sitting in the sigmoid's flat tails would produce exactly this kind of
+weight-insensitive null result regardless of `DIR_LOSS_WEIGHT`; but (2) given
+`hf_patchtst_revin_no_volume` already achieves above-chance direction with zero loss
+engineering, continuing to chase the volume-included variant has a shrinking case for
+priority -- the practical recommendation is to move on to backtesting step 4 rather than
+running a further scale sweep on this path, unless there's a specific reason volume must
+stay in the model.
+
+**Caveats**: one seed per combination (not per-weight noise-checked); `DIR_LOSS_SCALE`
+still fixed/untested; no backtest run (still below-chance direction on every combination).
