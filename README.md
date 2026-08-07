@@ -295,7 +295,7 @@ python scripts/models/evaluate_mamba.py \
   --transaction-cost-bps 1
 ```
 
-Both modes write a full report to `data/predictions/mamba_eval.json`; checkpoint mode also writes fresh per-row forecasts to `data/predictions/mamba_eval.parquet`. The report includes point-forecast accuracy, zero/mean/lag-one forecast baselines, validation-calibrated interval coverage, and a chronological confidence-threshold strategy sweep with always-long and lag-one strategy baselines. Transaction cost is a one-way cost on position turnover; use `0` for a frictionless diagnostic and a realistic nonzero value for performance assessment.
+Both modes write a full report to `data/predictions/mamba_eval.json`; checkpoint mode also writes fresh per-row forecasts to `data/predictions/mamba_eval.parquet`. The report includes point-forecast accuracy, zero/mean/lag-one forecast baselines, validation-calibrated interval coverage, and chronological threshold sweeps for combined long/short, long-only, and short-only strategies. These three breakdowns are produced automatically with the same command. Transaction cost is a one-way cost on position turnover; use `0` for a frictionless diagnostic and a realistic nonzero value for performance assessment.
 
 The evaluator checks the saved feature order, model settings, scaler, and lookback. The current checkpoint format does not store hashes of the data files, so use the same `val.parquet` and `test.parquet` versions that were present in Colab.
 

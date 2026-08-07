@@ -58,6 +58,43 @@ def test_strategy_threshold_can_leave_strategy_flat():
     assert result["annualized_net_sharpe"] is None
 
 
+def test_strategy_metrics_separates_long_and_short_signals():
+    actual = np.array([0.01, -0.02, 0.03, -0.04])
+    predicted = np.array([0.02, -0.01, -0.01, 0.01])
+
+    long_only = strategy_metrics(
+        actual, predicted, 0.0, 0.0, 1764, position_mode="long_only"
+    )
+    short_only = strategy_metrics(
+        actual, predicted, 0.0, 0.0, 1764, position_mode="short_only"
+    )
+
+    assert long_only["position_mode"] == "long_only"
+    assert long_only["active_periods"] == 2
+    assert long_only["directional_accuracy_when_active"] == pytest.approx(0.5)
+    assert long_only["gross_compounded_return"] == pytest.approx(
+        (1.01 * 0.96) - 1
+    )
+    assert short_only["position_mode"] == "short_only"
+    assert short_only["active_periods"] == 2
+    assert short_only["directional_accuracy_when_active"] == pytest.approx(0.5)
+    assert short_only["gross_compounded_return"] == pytest.approx(
+        (1.02 * 0.97) - 1
+    )
+
+
+def test_strategy_metrics_rejects_unknown_position_mode():
+    with pytest.raises(ValueError, match="position_mode"):
+        strategy_metrics(
+            np.array([0.01]),
+            np.array([0.01]),
+            0.0,
+            0.0,
+            1764,
+            position_mode="longish",
+        )
+
+
 def test_build_report_includes_baselines_intervals_and_skill():
     actual = np.array([0.01, -0.02, 0.03])
     predicted = np.array([0.008, -0.018, 0.025])
@@ -87,6 +124,16 @@ def test_build_report_includes_baselines_intervals_and_skill():
         "lag_one_return",
     }
     assert len(report["sign_strategy"]["threshold_sweep"]) == 2
+    assert len(report["sign_strategy"]["long_only_threshold_sweep"]) == 2
+    assert len(report["sign_strategy"]["short_only_threshold_sweep"]) == 2
+    assert all(
+        row["position_mode"] == "long_only"
+        for row in report["sign_strategy"]["long_only_threshold_sweep"]
+    )
+    assert all(
+        row["position_mode"] == "short_only"
+        for row in report["sign_strategy"]["short_only_threshold_sweep"]
+    )
     assert report["forecast"]["skill_vs_zero_return"]["mae"] > 0
 
 

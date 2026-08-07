@@ -234,21 +234,32 @@ def strategy_metrics(
     threshold_bps: float,
     transaction_cost_bps: float,
     periods_per_year: int,
-) -> dict[str, float | int | None]:
-    """Evaluate a chronological long/short/flat one-period signal.
+    position_mode: str = "long_short",
+) -> dict[str, float | int | str | None]:
+    """Evaluate a chronological one-period signal for the requested position mode.
 
     Position at row t is sign(pred_t), unless the prediction magnitude is below
-    the threshold. Costs are charged on absolute position turnover, so a direct
-    long-to-short reversal costs twice as much as entering from flat. The final
-    position is closed after the final observed return.
+    the threshold. ``long_only`` discards negative predictions, ``short_only``
+    discards positive predictions, and ``long_short`` keeps both. Costs are charged
+    on absolute position turnover, so a direct long-to-short reversal costs twice
+    as much as entering from flat. The final position is closed after the final
+    observed return.
     """
     if threshold_bps < 0 or transaction_cost_bps < 0:
         raise ValueError("thresholds and transaction costs must be non-negative")
     if periods_per_year < 1:
         raise ValueError("periods_per_year must be positive")
+    if position_mode not in {"long_short", "long_only", "short_only"}:
+        raise ValueError(
+            "position_mode must be 'long_short', 'long_only', or 'short_only'"
+        )
 
     threshold = threshold_bps / 10_000.0
     positions = np.where(np.abs(y_pred) >= threshold, np.sign(y_pred), 0.0)
+    if position_mode == "long_only":
+        positions = np.where(positions > 0, positions, 0.0)
+    elif position_mode == "short_only":
+        positions = np.where(positions < 0, positions, 0.0)
     active = positions != 0
     turnover = np.abs(np.diff(np.concatenate([[0.0], positions])))
     costs = turnover * (transaction_cost_bps / 10_000.0)
@@ -266,6 +277,7 @@ def strategy_metrics(
         )
 
     return {
+        "position_mode": position_mode,
         "threshold_bps": float(threshold_bps),
         "active_periods": int(active.sum()),
         "exposure": float(active.mean()),
@@ -324,10 +336,11 @@ def build_report(
         ),
         "sign_strategy": {
             "note": (
-                "Chronological long/short/flat strategy using sign(prediction). "
-                "Returns are compounded in test order. A one-way cost is charged on "
-                "absolute position turnover; a direct long/short reversal has turnover "
-                "2. This is a diagnostic backtest, not an execution simulation."
+                "Chronological sign strategies reported three ways: combined long/short, "
+                "long-only, and short-only. Returns are compounded in test order. A "
+                "one-way cost is charged on absolute position turnover; a direct "
+                "long/short reversal has turnover 2. This is a diagnostic backtest, not "
+                "an execution simulation."
             ),
             "transaction_cost_bps": float(transaction_cost_bps),
             "periods_per_year": periods_per_year,
@@ -338,6 +351,7 @@ def build_report(
                     0.0,
                     transaction_cost_bps,
                     periods_per_year,
+                    position_mode="long_only",
                 ),
                 "lag_one_return": strategy_metrics(
                     y_true,
@@ -354,6 +368,28 @@ def build_report(
                     threshold,
                     transaction_cost_bps,
                     periods_per_year,
+                )
+                for threshold in thresholds_bps
+            ],
+            "long_only_threshold_sweep": [
+                strategy_metrics(
+                    y_true,
+                    y_pred,
+                    threshold,
+                    transaction_cost_bps,
+                    periods_per_year,
+                    position_mode="long_only",
+                )
+                for threshold in thresholds_bps
+            ],
+            "short_only_threshold_sweep": [
+                strategy_metrics(
+                    y_true,
+                    y_pred,
+                    threshold,
+                    transaction_cost_bps,
+                    periods_per_year,
+                    position_mode="short_only",
                 )
                 for threshold in thresholds_bps
             ],
