@@ -1,0 +1,24 @@
+{
+  "experiment": {
+    "name": "hf_patchtst_revin_no_volume_patch14_14",
+    "description": "hf_patchtst_revin_no_volume (step 4) with patch_length=14, patch_stride=14 (no overlap, 5 patches) -- follow-up to a wider patch-geometry sweep lost to a Colab disconnect before its checkpoints could be pushed. That sweep's forecasting metrics for this exact config were retained (printed output survived locally) and pointed to patch length 14 itself -- not overlap -- being the driver behind the (14, 7) config's earlier win. This run retrains just this one config to get a pushable checkpoint for backtesting. Everything else identical to step 4: 20 epochs, flat LR=6e-4, plain RevIN MSE, no directional term.",
+    "target": "raw_price_revin_no_volume",
+    "include_volume": false,
+    "loss_weights": {
+      "note": "unweighted -- single RevIN-normalized MSE over the 4 OHLC channels"
+    },
+    "channel_attention": false,
+    "seed": 0
+  },
+  "best_val_loss": 0.1247861792643865,
+  "best_val_epoch": 20,
+  "n_windows": 2397,
+  "ohlc_mae": 1.7867854833602905,
+  "ohlc_rmse": 3.050504684448242,
+  "directional_accuracy": [
+    0.5273258239465999,
+    0.541927409261577,
+    0.5456821026282853
+  ],
+  "coherence_rate": 0.9370045890696704
+}
