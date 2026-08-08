@@ -1,0 +1,26 @@
+{
+  "experiment": {
+    "name": "hf_patchtst_revin_no_volume_closeweighted",
+    "description": "hf_patchtst_revin_no_volume (step 4) with a per-channel weighted RevIN MSE loss -- close upweighted to CLOSE_WEIGHT=4.0 relative to open/high/low (weight 1.0 each), since every trading-relevant quantity (take_profit, direction, coherence) is a function of predicted close alone. Everything else identical to step 4: patch_length=7, patch_stride=7, 20 epochs, flat LR=6e-4, no directional term, no schedule.",
+    "target": "raw_price_revin_no_volume",
+    "include_volume": false,
+    "loss_weights": {
+      "note": "per-channel weighted MSE: open=1.0, high=1.0, low=1.0, close=CLOSE_WEIGHT"
+    },
+    "channel_attention": true,
+    "seed": 0
+  },
+  "best_val_loss": 0.2490600826740265,
+  "best_val_epoch": 19,
+  "n_windows": 2397,
+  "ohlc_mae": 2.283952236175537,
+  "ohlc_rmse": 3.415675401687622,
+  "close_mae": 2.469862937927246,
+  "close_rmse": 3.6743040084838867,
+  "directional_accuracy": [
+    0.5252398831873175,
+    0.538589904046725,
+    0.5448477263245723
+  ],
+  "coherence_rate": 0.966624947851481
+}
