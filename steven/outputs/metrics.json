@@ -49,26 +49,20 @@
       "annual_return": 0.06736276353035153
     },
     "cvae": {
-      "n_decisions": 800,
-      "n_trades": 799,
+      "n_decisions": 2397,
+      "n_trades": 0,
       "outcome_breakdown": {
-        "win_take_profit": 0.8375,
-        "win_expiry": 0.00375,
-        "lose_expiry": 0.15125,
-        "lose_stop_loss": 0.00625,
-        "skipped": 0.00125,
-        "no_trade": 0.0
+        "win_take_profit": 0.0,
+        "win_expiry": 0.0,
+        "lose_expiry": 0.0,
+        "lose_stop_loss": 0.0,
+        "skipped": 0.0,
+        "no_trade": 1.0
       },
-      "total_return": -0.03839171811364972,
-      "win_rate": 0.8423028785982478,
-      "take_profit_rate": 0.8385481852315394,
-      "avg_return": -4.2174126537935904e-05,
-      "entry_date": "2024-01-16",
-      "entry_price": 474.95,
-      "exit_date": "2025-05-30",
-      "exit_price": 585.2960337492228,
-      "elapsed_years": 1.36881131644992,
-      "annual_return": -0.02819496149406797
+      "total_return": 0.0,
+      "win_rate": null,
+      "take_profit_rate": null,
+      "avg_return": null
     }
   }
 }
