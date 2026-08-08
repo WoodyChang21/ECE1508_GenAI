@@ -281,3 +281,68 @@ stay in the model.
 
 **Caveats**: one seed per combination (not per-weight noise-checked); `DIR_LOSS_SCALE`
 still fixed/untested; no backtest run (still below-chance direction on every combination).
+
+## hf_patchtst_revin_no_volume_dirloss -- weight sweep (step 4 + directional loss)
+
+**What**: Closes the gap the caveat above left open -- directional loss had only ever been
+tried on step 3b, a volume-included variant that was *already* below-chance before the loss
+term was added, so that result only showed the mechanism doesn't rescue a broken model, not
+that it can't help a working one. This run ports the same `directional_loss()` mechanism
+(`loss = mse + DIR_LOSS_WEIGHT * dir_loss`, `dir_loss = -log(sigmoid(DIR_LOSS_SCALE *
+pred_ret * true_ret))`) onto `hf_patchtst_revin_no_volume` (step 4) itself -- the model
+that's actually being walk-forward backtested, and the best forecasting result on this
+branch (dir acc 0.52-0.55, coherence 0.97-0.99). `DIR_LOSS_WEIGHT` swept over
+`[0.1, 0.5, 1.0, 3.0]`, crossed with both `channel_attention` settings, `DIR_LOSS_SCALE`
+held fixed at `1.0`. 8 runs total, identical architecture/data/RevIN otherwise.
+Notebook: `steven/train_patchtst_hf_channel_attention.ipynb`.
+
+| Weight | `channel_attention` | OHLC RMSE ($) | Dir Acc (bar 1/2/3) | Coherence |
+|---|---|---|---|---|
+| -- (baseline) | False | 3.1484 | 0.5240 / 0.5403 / 0.5524 | 0.9741 |
+| -- (baseline) | True | 3.2878 | 0.5344 / 0.5440 / 0.5519 | 0.9875 |
+| 0.1 | False | 3.1253 | 0.5236 / 0.5382 / 0.5499 | 0.9412 |
+| 0.1 | True | 3.4010 | 0.5265 / 0.5419 / 0.5524 | 0.9808 |
+| 0.5 | False | 3.1253 | 0.5065 / 0.5219 / 0.5273 | 0.7939 |
+| 0.5 | True | 3.2380 | 0.5198 / 0.5382 / 0.5490 | 0.9712 |
+| 1.0 | False | 3.1285 | 0.5140 / 0.5186 / 0.5365 | 0.8798 |
+| 1.0 | True | 3.0628 | 0.5173 / 0.5223 / 0.5336 | 0.7972 |
+| 3.0 | False | 3.1027 | **0.4827 / 0.4764 / 0.4902** | 0.7764 |
+| 3.0 | True | 3.7407 | 0.5035 / 0.4827 / 0.4856 | 0.9145 |
+
+**Conclusion: decisive negative result, and a stronger one than step 3b's.** Directional
+loss doesn't just fail to help step 4 -- it actively erodes the two properties that made
+step 4 worth backtesting in the first place. Directional accuracy never improves over the
+no-dirloss baseline at any weight; it degrades as weight increases, and at `weight=3.0`
+(`channel_attention=False`) drops to **0.4827-0.4902 -- below chance**, undoing exactly the
+above-chance signal step 4 was built to demonstrate. Coherence takes the bigger, more
+consistent hit: every single weight/setting combination scores below its matching
+baseline, sometimes drastically (0.9741 -> 0.7939 at weight=0.5/False; 0.9875 -> 0.7972 at
+weight=1.0/True) -- there is no weight where coherence stays intact. OHLC RMSE is a mixed
+bag (flat-to-slightly-better for `False`, worse for `True` at weight 0.1 and 3.0,
+peaking at 3.74) -- not the main story either way.
+
+**This is a stronger negative result than `hf_patchtst_revin_ohlc_global_volume_dirloss`'s
+weight sweep**: there, directional accuracy stayed flat/null (0.451-0.473, no trend) --
+the mechanism simply didn't move the needle on an already-broken model. Here, applied to a
+model that already had real, above-chance signal, the same mechanism actively destroys it
+as weight increases. Taken together, directional loss (as implemented -- a soft
+sign-agreement term added to RevIN MSE) has now been tested on both a broken and a working
+base model and failed decisively both times. The lowest weight tried (0.1) comes closest
+to neutral (dir acc within noise of baseline, RMSE roughly flat) but still costs 3-6 points
+of coherence for no measurable directional benefit -- there is no weight in this grid worth
+trading for.
+
+**Implication for the training-pipeline review**: this closes out the loss-engineering
+lever entirely on this branch. The recommendation going forward is to leave
+`hf_patchtst_revin_no_volume`'s existing (no-dirloss) checkpoints as the one being
+backtested, and move to the other pipeline levers identified in the training-pipeline
+review instead -- an LR schedule and/or overlapping patches (`patch_length > patch_stride`)
+-- rather than any further directional-loss weight/scale tuning.
+
+**Caveats**: one seed per combination, same as every other run on this branch;
+`DIR_LOSS_SCALE=1.0` still fixed/untested (though given directional accuracy actively
+*worsens* with weight here, a scale sweep looks unlikely to rescue this mechanism the way
+it might have for step 3b's flat-null result); no backtest run on any of these 8
+checkpoints (dropping in-sample directional accuracy on 7/8 combinations, and below-chance
+on 1/8, makes a backtest not worth running here -- the existing step 4 checkpoints remain
+the ones to backtest).
