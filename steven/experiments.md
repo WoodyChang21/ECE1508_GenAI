@@ -346,3 +346,61 @@ it might have for step 3b's flat-null result); no backtest run on any of these 8
 checkpoints (dropping in-sample directional accuracy on 7/8 combinations, and below-chance
 on 1/8, makes a backtest not worth running here -- the existing step 4 checkpoints remain
 the ones to backtest).
+
+## hf_patchtst_revin_no_volume_lrschedule (step 4 + cosine LR schedule)
+
+**What**: Tests the optimization-side lever from the training-pipeline review, on the same
+model directional loss was already ruled out on. Step 4's baseline training curve was
+inspected directly (not just its final metrics): train loss was still dropping ~4-5% per
+epoch through epoch 20 with no flattening, and best val loss landed at the final epoch
+(`False`) or second-to-last epoch (`True`) rather than plateauing earlier -- evidence the
+flat-`LR=6e-4`-for-20-epochs baseline hadn't converged. This run adds
+`torch.optim.lr_scheduler.CosineAnnealingLR(T_max=20, eta_min=6e-6)`, stepped once per
+epoch, no warmup -- otherwise identical architecture/data/loss (plain RevIN MSE, no
+directional term) to step 4. Notebook: `steven/train_patchtst_hf_channel_attention.ipynb`.
+
+| Setting | OHLC RMSE ($) | Dir Acc (bar 1/2/3) | Coherence | Best val loss |
+|---|---|---|---|---|
+| baseline (flat LR), False | 3.1484 | 0.5240 / 0.5403 / 0.5524 | 0.9741 | 0.1331 |
+| baseline (flat LR), True | 3.2878 | 0.5344 / 0.5440 / 0.5519 | 0.9875 | 0.1316 |
+| cosine LR, False | **3.0547** | 0.5006 / 0.5252 / 0.5219 | 0.9107 | 0.1756 |
+| cosine LR, True | **3.0033** | **0.4948** / 0.5027 / 0.5048 | 0.8882 | 0.1731 |
+
+**Conclusion: RMSE improves, but at a real cost to the two metrics that actually matter for
+trading -- another negative result for the goal of this branch.** OHLC RMSE drops
+meaningfully for both settings (3.15 -> 3.05 for `False`, 3.29 -> 3.00 for `True`, the best
+RMSE seen on this branch), confirming the schedule does let the optimizer fit the price
+level more precisely, as hypothesized from the unconverged training curve. But directional
+accuracy falls on every bar for both settings, and `channel_attention=True`'s bar-1
+accuracy drops to **0.4948 -- below chance**, something step 4's baseline never showed on
+any bar. Coherence takes the bigger hit: 0.9741 -> 0.9107 (`False`) and 0.9875 -> 0.8882
+(`True`), the largest coherence drop seen from a "successful" (RMSE-improving) change on
+this branch. Best val loss also rose for both settings (0.133 -> 0.176, 0.132 -> 0.173)
+despite the RMSE improvement -- val loss and test-set RMSE are measured on different splits
+(val vs. test) so this isn't strictly contradictory, but it does mean the schedule's
+selected checkpoint fits its own validation set less tightly than the flat-LR baseline did.
+
+**This is the same RMSE/directional-accuracy divergence the whole branch has already
+established, now demonstrated from the opposite direction**: earlier experiments showed
+RMSE improvements don't reliably track directional accuracy; this one shows a change that
+tightens RMSE can actively *degrade* directional accuracy and coherence. A schedule that
+lets training converge more precisely on point-level price fit appears to push the model
+further toward a lower-error-but-less-committed prediction (right in line with the
+"MSE-optimal forecast on a near-random-walk series looks like persistence" theory from the
+training-pipeline review) -- exactly the failure mode the coherence/direction metrics were
+designed to catch.
+
+**Implication**: extending training precision on the current RevIN-MSE objective is not
+the fix -- it trades away the one thing (coherence + above-chance direction) that made step
+4 worth backtesting in the first place, for a metric (RMSE) that's never once tracked
+trading-relevant quality on this branch. Combined with `hf_patchtst_revin_no_volume_dirloss`,
+both the loss-engineering and (this) optimization-schedule levers have now failed on step
+4's exact model. The unconverged-training-curve finding remains worth acting on, but via a
+lever that doesn't also over-fit price level -- e.g. more epochs *without* a decay-to-zero
+schedule (so the model gets more time but isn't pushed as hard toward the RMSE-minimizing
+regime), which is the next experiment queued.
+
+**Caveats**: one seed per setting; `LR_ETA_MIN_FRAC=0.01` and no-warmup are both untuned --
+a shallower decay floor might recover some of the coherence loss while keeping part of the
+RMSE gain, untested; no backtest run (directional accuracy dropped, in one case below
+chance, so not worth backtesting over the existing step 4 checkpoints).
