@@ -137,11 +137,20 @@ the previous run's collapsed constant was positively signed instead. Read as "a 
 collapsed fixed point," not evidence the bottleneck itself helps or hurts. Left in the config (doesn't
 hurt) but isn't the fix. Full numbers in `cvae_direction_collapse.md`'s To-do list.
 
-**Now trying an auxiliary direction loss instead**: `w_direction`/`direction_temperature`
+**Tried an auxiliary direction loss next**: `w_direction`/`direction_temperature`
 (`configs/cvae.yaml`, `src/losses.py`) add a binary cross-entropy term on the sign of
 `per_bar_close_return` (`open_ret + body_ret`) -- a much more direct classification-style gradient
-for a binary-ish property like direction than plain MSE was ever giving it. Untested pending a
-retrain; see `cvae_direction_collapse.md`'s To-do for the recheck plan.
+for a binary-ish property like direction than plain MSE was ever giving it. **Checked against a real
+retrain (checkpoint `ceb78d7`) -- did not fix collapse, and the practical symptom got worse.** The
+training log's own `dir=` term settled at 0.70-0.72, barely above `ln(2)=0.693` (a classifier that
+always predicts 50/50) -- it never learned to beat chance. Rechecked numbers: variance ratio 0.928
+(still collapsed), correlation with trend r=+0.146 (still noise-level at N=100), predicted return vs.
+`close_0` negative on 100% of 300 tested windows again, now more negatively biased (-0.14% mean) than
+the `decoder_ctx_dim` run's -0.09%. Three interventions in a row (loss-scale, architecture, auxiliary
+loss) have now each converged to the same story -- a small, context-independent constant whose sign
+is arbitrary per run, with trend correlation indistinguishable from zero every time. Full numbers and
+a look back at the best pre-collapse-chasing checkpoint (`2c4ad99`, +6.79% total return, before any
+of these three fixes existed) in `cvae_direction_collapse.md`.
 
 ## "Trade confidence" redesign (alias: **trade confidence**) -- implemented (2026-08-07)
 

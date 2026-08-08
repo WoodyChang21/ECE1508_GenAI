@@ -269,13 +269,52 @@ CVAE-specific gap beyond whatever the shared difficulty is — the VAE informati
     combines with whatever fixes collapse for real) but not the fix on its own.
   - Side effect worth remembering: this is also why `n_decisions` jumped from ~800 to 2397 in
     this run without the test period changing — see the walk-forward advance-rule item above.
-- [ ] **Auxiliary direction loss (`w_direction`/`direction_temperature` in `configs/cvae.yaml`,
+- [x] **Auxiliary direction loss (`w_direction`/`direction_temperature` in `configs/cvae.yaml`,
   `losses.py`)** — tried next, since neither loss-scale correction nor an architectural
   bottleneck gave plain MSE enough signal to stop `body_ret` from collapsing to *some*
   constant. Adds a binary cross-entropy term on the sign of `per_bar_close_return`
   (`open_ret + body_ret` — the same quantity PatchTST's own quality gate checks the sign of,
   and exactly what `exit_price_from_components`'s take-profit target is built from), a much
   more direct classification-style signal than an MSE term ever gives for a binary-ish
-  property like direction. Untested pending a retrain; recheck with the same three signals
-  above, plus specifically whether the predicted-return distribution (vs. `close_0`) actually
-  spans both signs instead of being uniformly one-signed.
+  property like direction. **Checked against a real retrain (checkpoint `ceb78d7`) — did not
+  fix collapse, and made the practical symptom worse:**
+  - The training log itself is the clearest signal: `dir=` (the direction BCE term) settled
+    at **0.70-0.72** by the end of training — barely above `ln(2)≈0.693`, the loss value for
+    a classifier that always predicts 50/50 regardless of input. It never meaningfully
+    dropped across any of the three annealing cycles.
+  - Rechecked with the same three signals as before, against real weights: across/within
+    `body_ret` variance ratio **0.928** (still <1, collapsed), correlation with a 10-bar
+    trend **r=+0.146** (N=100, still noise-level), predicted return vs. `close_0` across 300
+    fresh windows **negative on 100% of them again** — mean **-0.14%** (vs. -0.09% on the
+    `decoder_ctx_dim`-only checkpoint), i.e. *more* negatively biased, not less.
+  - Read together with the two entries above: **three independent interventions in a row**
+    (loss-scale correction, architectural context bottleneck, direct classification loss on
+    direction) have each converged to the same qualitative outcome — a small, nearly
+    context-independent constant, whose sign flips arbitrarily between training runs, with
+    correlation-to-trend bouncing around zero within noise every time (-0.03, -0.03, +0.10,
+    +0.15 across four checkpoints now measured this way). None has produced a directional
+    signal that's demonstrably better than the model's own best constant guess. This is
+    starting to look less like "the CVAE side has a fixable bug" and more like a genuine
+    ceiling: PatchTST's own trend correlation was also weak (r=-0.137), consistent with
+    3-bar-ahead direction from a 70-bar hourly SPY context being close to unpredictable, and
+    any MSE/BCE-trained model rationally converging toward its best constant for a
+    mostly-noise target regardless of which knob gets turned.
+
+## Revisiting the pre-collapse-chasing checkpoint
+
+Before any of the three interventions above, commit `2c4ad99` ("Add a shared 2% stop-loss")
+had the best walk-forward result CVAE has produced under the current (comparable,
+apples-to-apples) walk-forward methodology: **total_return +6.79%, annual_return +4.91%,
+win_rate 88.3%, 684/1030 decisions traded (66.4% — genuinely selective, not the ~100%-or-0%
+extremes every checkpoint since has landed on)**. Its architecture was `z_dim=8, ctx_dim=64,
+decoder_hidden=128, ctx_dropout=0.3` (the KL-budget-concentration fix already in place) with
+**no `price_scale`, no `decoder_ctx_dim`, no `w_direction`** — i.e. it predates the discovery
+that volume was dominating the reconstruction loss ~1800:1. Every fix attempted since has
+made the loss *more correct* by that diagnosis but hasn't reproduced (or exceeded) this
+result — worth being honest that this could mean the loss-scale bug wasn't actually the
+thing standing between CVAE and a working strategy, or it could mean `2c4ad99`'s selectivity
+pattern was a favorable roll against this one 1.37-year test path rather than a real edge
+(no correlation-with-trend check exists for this specific checkpoint, since that diagnostic
+didn't exist yet when it was current — everything measured *since* has been indistinguishable
+from noise). See discussion with the user before deciding whether to reproduce this config
+as a baseline to compare against, or to treat it as a data point rather than a target.
