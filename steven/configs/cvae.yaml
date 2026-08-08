@@ -11,14 +11,7 @@ model:
 
 loss:
   w_price: 1.0
-  # was 0.5 -- price_scale (see losses.py) already corrects the raw ~1800:1 scale
-  # mismatch between volume and price, so 0.5 was only a mild 2x downweight on top of
-  # parity. Direction (body_ret) still only reached ~6% of real market variability after
-  # that fix (see cvae_direction_collapse.md's re-check), so dropping this further, by
-  # ~2-3 orders of magnitude, actively deprioritizes volume reconstruction instead of just
-  # correcting its scale -- next experiment in backlog.md before reaching for an
-  # architectural fix (decoupling the decoder's context from the prior's).
-  w_vol: 0.001
+  w_vol: 0.5
   # was a single 0->1 ramp over 5 epochs then flat at 1.0 for the rest -- cyclical
   # annealing instead (Fu et al. 2019): 3 cycles across training, each ramping 0->1 over
   # its first half then holding, so the decoder gets repeated chances to learn to use z
