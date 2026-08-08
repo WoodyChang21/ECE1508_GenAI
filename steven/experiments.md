@@ -479,3 +479,74 @@ every bar makes this not worth backtesting); `EARLY_STOP_PATIENCE=8` monitoring 
 now shown to be the wrong stopping signal for this objective -- not retried with a
 directional/coherence-based stopping rule, since the loss-engineering angle (directional
 loss) is already independently ruled out.
+
+## Bonus: hf_patchtst_revin_no_volume_lrschedule walk-forward backtest
+
+**What**: A backtest against the LR-schedule checkpoints (`hf_patchtst_revin_no_volume_lrschedule`, cosine decay, see its own entry above) was run alongside the overlap experiment. Not originally planned -- included here since it landed and is informative regardless of the checkpoint's forecasting-metric regression.
+
+| Setting | Trades | Win rate | Take-profit rate | Total return | Annual return |
+|---|---|---|---|---|---|
+| step 4 baseline, False | 868 | 69.12% | 57.60% | +9.62% | +6.95% |
+| lrschedule, False | 250 | **75.20%** | 73.60% | **-9.52%** | -7.14% |
+| step 4 baseline, True | 535 | 66.36% | 55.14% | +8.06% | +5.87% |
+| lrschedule, True | 274 | **75.91%** | 75.18% | +6.45% | +4.73% |
+
+**Conclusion: higher per-trade win rate does not mean better returns -- another clean
+illustration of this branch's central caveat (forecasting metrics don't reliably predict
+backtest profitability), now shown from the confidence-gate side rather than the
+target/loss side.** The LR-schedule model's lower coherence rate (0.911/0.888 vs baseline's
+0.974/0.988) means far fewer windows pass the binary coherent-up confidence gate -- 250-274
+trades taken here vs. 535-868 for the baseline, roughly a 3x reduction. The trades that
+*do* get taken have a notably higher win rate (75% vs 69%/66%) and take-profit rate
+(74-75% vs 55-58%) -- consistent with a stricter, more selective gate filtering harder. But
+`False` still finishes **net negative** (-9.5% total) despite that 75% win rate, because
+there's too little trade volume left to compound into a positive outcome; `True` stays
+positive but at roughly half the baseline's return. Directional-accuracy/coherence
+regressions don't always show up as "the same number of worse trades" -- here they showed
+up as "fewer, individually better trades," and the net effect on total return was still
+negative for one setting.
+
+**Caveats**: same test window/methodology as every other backtest on this branch
+(2024-01 to 2025-05, bullish for SPY); one seed per setting, no repeat of this specific
+comparison at other confidence/return thresholds.
+
+## hf_patchtst_revin_no_volume_overlap (step 4 + 50% overlapping patches)
+
+**What**: Step 3 of the training-pipeline-review plan -- changes `patch_length` from 7 to
+14 (`patch_stride` stays 7, so patches now overlap 50%, 9 patches instead of 10
+non-overlapping ones) on `hf_patchtst_revin_no_volume`. Isolated from every other lever
+already ruled out on this model (directional loss, LR schedule, more epochs/early
+stopping): same 20 epochs, flat `LR=6e-4`, plain RevIN MSE, no directional term.
+Notebook: `steven/train_patchtst_hf_channel_attention.ipynb`.
+
+| Setting | OHLC RMSE ($) | Dir Acc (bar 1/2/3) | Coherence | Best val loss |
+|---|---|---|---|---|
+| baseline (non-overlap), False | 3.1484 | 0.5240 / 0.5403 / 0.5524 | 0.9741 | 0.1331 |
+| baseline (non-overlap), True | 3.2878 | 0.5344 / 0.5440 / 0.5519 | 0.9875 | 0.1316 |
+| overlap (50%), False | **3.0305** | 0.5232 / 0.5327 / 0.5465 | 0.9266 | 0.1201 |
+| overlap (50%), True | **3.0403** | 0.5215 / 0.5340 / 0.5453 | 0.9011 | 0.1164 |
+
+**Conclusion: mixed result, but the best-behaved "RMSE improves" attempt on this branch so
+far.** RMSE improves for both settings (3.15 -> 3.03, 3.29 -> 3.04, the best RMSE seen on
+this branch, edging out even the LR-schedule run's 3.05/3.00) and best val loss also
+improves genuinely (0.133 -> 0.120, 0.132 -> 0.116, unlike the LR-schedule run where val
+loss got *worse* despite better test RMSE). Directional accuracy drops on every bar for
+both settings, but only modestly (0.5-1.3 points per bar) and **stays solidly above chance
+throughout** -- unlike the LR-schedule run (True's bar-1 dropped to 0.4948, below chance)
+and the early-stopping run (below chance on every bar). Coherence drops from ~0.97-0.99 to
+0.90-0.93 -- a real cost, but smaller than the LR-schedule run's 0.91/0.89 and the
+early-stopping run's comparable range.
+
+**This is not a clean win** (dir acc and coherence both still regress vs. the step 4
+baseline), but it's a categorically smaller and better-behaved regression than either
+training-duration lever produced for a comparable RMSE gain -- suggesting patch overlap
+buys some of the same "fit price more precisely" benefit the other levers chased, without
+triggering the same collapse-toward-persistence failure mode. Worth a walk-forward backtest
+to see whether it holds up in practice, given this branch's repeated finding that
+forecasting metrics and backtest profitability don't move in lockstep (see the
+lrschedule backtest entry directly above, where a *worse* forecasting result partially
+still produced *higher* per-trade win rates).
+
+**Caveats**: one seed per setting; both settings' `best_val_epoch` landed at the final
+epoch (20/20, vs. baseline's 20/19) -- weak evidence training hadn't fully plateaued here
+either, though nowhere near as pronounced as step 4's original curve; no backtest run yet.
