@@ -5,6 +5,39 @@ Human-readable summary of results already stored under `steven/comparison_metric
 makes them easy to scan/compare -- see the JSON files for full detail (backtest included,
 for the baseline).
 
+## Current best models (backtest leaderboard, updated after each backtest)
+
+All rows: `hf_patchtst_revin_no_volume` family (RevIN, raw OHLC target, no volume, plain
+unweighted MSE unless noted), walk-forward backtest via `steven/src/evaluate_revin.py`,
+coherence-only confidence gate, `min_return_threshold=0.001`, same 2024-01-2025-05 SPY test
+window throughout (buy-and-hold benchmark over that window: +24.11% total / +17.09% annual).
+
+| Rank | Config | `channel_attention` | Total return | Annual return | Win rate | Trades |
+|---|---|---|---|---|---|---|
+| 1 | patch `(14,14)` | False | **+14.47%** | **+10.39%** | 72.68% | 626 |
+| 2 | patch `(14,7)` overlap | True | +12.81% | +9.23% | 75.14% | 527 |
+| 3 | patch `(14,7)` overlap | False | +9.68% | +6.99% | 75.68% | 584 |
+| 4 | baseline `(7,7)` | False | +9.62% | +6.95% | 69.12% | 868 |
+| 5 | baseline `(7,7)` | True | +8.06% | +5.87% | 66.36% | 535 |
+| 6 | LR schedule (cosine) | True | +6.45% | +4.73% | 75.91% | 274 |
+| 7 | patch `(14,14)` | True | -0.18% | -0.13% | 70.07% | 705 |
+| 8 | LR schedule (cosine) | False | -9.52% | -7.14% | 75.20% | 250 |
+
+(Directional-loss and early-stopping variants are excluded -- both had below-chance
+forecasting-metric directional accuracy and were never backtested.)
+
+**Best single model so far: `hf_patchtst_revin_no_volume_patch14_14`,
+`channel_attention=False`** -- patch_length=14, patch_stride=14 (no overlap), otherwise
+identical to step 4 (20 epochs, flat LR=6e-4, plain RevIN MSE, no directional term).
+Checkpoint: `steven/outputs/patchtst_revin_novolume_patch14_14_channel_attention_false_checkpoint.pt`.
+
+**Caveat that matters most right now**: patch geometry interacts with `channel_attention`
+non-additively -- `(14,7)` is best for `True`, `(14,14)` is best for `False`, and each is
+mediocre-to-bad for the other setting. Every result above is a single seed. Given how
+sharply rank #1 and #7 diverge from the *same* patch config just by flipping
+`channel_attention`, seed noise is a real, live risk for the leaderboard's exact ordering
+-- treat rank 1 vs. 2 vs. 3 as "the current best guesses," not settled.
+
 ## hf_patchtst_fused_head
 
 **What**: HF `PatchTSTModel` backbone (real channel-independent patching + self-attention)
