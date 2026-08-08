@@ -37,38 +37,38 @@
         "skipped": 0.6431956668923493,
         "no_trade": 0.04536222071767095
       },
-      "total_return": 0.09317787358613705,
+      "total_return": 0.09317390513977708,
       "win_rate": 0.6326086956521739,
       "take_profit_rate": 0.41304347826086957,
-      "avg_return": 0.00020387389348900772,
+      "avg_return": 0.00020386598939481045,
       "entry_date": "2024-01-17",
       "entry_price": 471.84,
       "exit_date": "2025-05-30",
-      "exit_price": 585.8899993419648,
+      "exit_price": 585.8900344848633,
       "elapsed_years": 1.3665297741273101,
-      "annual_return": 0.06736559899342609
+      "annual_return": 0.06736276353035153
     },
     "cvae": {
-      "n_decisions": 1030,
-      "n_trades": 684,
+      "n_decisions": 799,
+      "n_trades": 799,
       "outcome_breakdown": {
-        "win_take_profit": 0.5864077669902913,
-        "win_expiry": 0.0,
-        "lose_expiry": 0.07184466019417475,
-        "lose_stop_loss": 0.005825242718446602,
-        "skipped": 0.19805825242718447,
-        "no_trade": 0.1378640776699029
+        "win_take_profit": 0.8723404255319149,
+        "win_expiry": 0.0025031289111389237,
+        "lose_expiry": 0.11639549436795996,
+        "lose_stop_loss": 0.008760951188986232,
+        "skipped": 0.0,
+        "no_trade": 0.0
       },
-      "total_return": 0.06787700565479127,
-      "win_rate": 0.8830409356725146,
-      "take_profit_rate": 0.8830409356725146,
-      "avg_return": 0.00010332659206427374,
+      "total_return": 0.05716628566774973,
+      "win_rate": 0.8748435544430538,
+      "take_profit_rate": 0.8723404255319149,
+      "avg_return": 7.693331491265067e-05,
       "entry_date": "2024-01-16",
       "entry_price": 474.95,
       "exit_date": "2025-05-30",
-      "exit_price": 585.4144614804983,
-      "elapsed_years": 1.36881131644992,
-      "annual_return": 0.04914737555526272
+      "exit_price": 589.2941276961565,
+      "elapsed_years": 1.3686972393337897,
+      "annual_return": 0.04145287657955388
     }
   }
 }
