@@ -1,6 +1,10 @@
-"""Shared weighted-MSE loss used identically by PatchTST and the CVAE decoder."""
+"""Shared weighted-MSE loss used identically by PatchTST and the CVAE decoder, plus an
+optional NLL reconstruction loss (CVAE-only -- PatchTST has no predicted variance to train
+against, see src/models/patchtst.py)."""
 
 from __future__ import annotations
+
+import math
 
 import torch
 import torch.nn.functional as F
@@ -70,6 +74,70 @@ def weighted_mse_loss(
     }
 
 
+def laplace_nll(true: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+    """-log p(true) for true ~ Laplace(mu, b), parametrized by logvar so Var = 2*b^2
+    matches logvar's usual meaning (b = exp(0.5*(logvar - log(2)))). Used for open_ret/
+    body_ret: short-horizon returns are heavier-tailed and roughly symmetric, a better fit
+    than Gaussian (see cvae_direction_collapse.md's "generative pivot" discussion)."""
+    b = torch.exp(0.5 * (logvar - math.log(2.0)))
+    return (true - mu).abs() / b + torch.log(2 * b)
+
+
+def gaussian_nll(true: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+    """-log p(true) for true ~ Normal(mu, exp(0.5*logvar)). Used for wicks (pragmatic
+    choice -- a rigorous fit would need a logit-space change-of-variables to handle the
+    non-negative, frequently-exactly-zero support correctly; revisit only if calibration
+    checks show this is actually a problem) and volume (already log+z-scored close to
+    Gaussian-shaped by data_pipeline.apply_normalize, no need for anything fancier)."""
+    return 0.5 * ((true - mu) ** 2 * torch.exp(-logvar) + logvar + math.log(2 * math.pi))
+
+
+def weighted_nll_loss(
+    pred_price: torch.Tensor,
+    pred_price_logvar: torch.Tensor,
+    pred_volume: torch.Tensor,
+    pred_vol_logvar: torch.Tensor,
+    true_y: torch.Tensor,
+    w_price: float = 1.0,
+    w_vol: float = 0.5,
+    w_direction: float = 0.0,
+    direction_temperature: float = 0.003,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """NLL counterpart to weighted_mse_loss -- same signature shape, same returned dict
+    keys (so train_cvae.py's logging needs no special-casing), but the reconstruction
+    terms are proper log-likelihoods under a per-component predicted variance instead of
+    plain MSE. No price_scale here: a learned per-example variance is an adaptive version
+    of what price_scale's single fixed train-set constant approximates (see
+    weighted_mse_loss's own docstring) -- keeping both active would double-correct, so
+    cvae_loss disables price_scale whenever reconstruction="nll" (logged explicitly, same
+    as use_price_scale=false already is).
+
+    open_ret/body_ret (price[...,:2]) use laplace_nll; wicks (price[...,2:]) and volume
+    use gaussian_nll -- see those functions' docstrings for why."""
+    true_price, true_volume = unpack_y(true_y)
+
+    direction_loss = pred_price.new_tensor(0.0)
+    if w_direction > 0:
+        pred_close_ret = per_bar_close_return(pred_price)  # (B, 3), real log-return scale
+        true_close_ret = per_bar_close_return(true_price)
+        target_up = (true_close_ret > 0).float()
+        direction_loss = F.binary_cross_entropy_with_logits(
+            pred_close_ret / direction_temperature, target_up
+        )
+
+    open_body_nll = laplace_nll(true_price[..., :2], pred_price[..., :2], pred_price_logvar[..., :2])
+    wick_nll = gaussian_nll(true_price[..., 2:], pred_price[..., 2:], pred_price_logvar[..., 2:])
+    price_loss = torch.cat([open_body_nll, wick_nll], dim=-1).mean()
+    vol_loss = gaussian_nll(true_volume, pred_volume, pred_vol_logvar).mean()
+
+    total = w_price * price_loss + w_vol * vol_loss + w_direction * direction_loss
+    return total, {
+        "price_loss": price_loss.item(),
+        "vol_loss": vol_loss.item(),
+        "direction_loss": direction_loss.item(),
+    }
+
+
 def kl_diag_gaussians(
     mu_q: torch.Tensor, logvar_q: torch.Tensor, mu_p: torch.Tensor, logvar_p: torch.Tensor
 ) -> torch.Tensor:
@@ -95,10 +163,27 @@ def cvae_loss(
     price_scale: torch.Tensor | None = None,
     w_direction: float = 0.0,
     direction_temperature: float = 0.003,
+    reconstruction: str = "mse",
+    pred_price_logvar: torch.Tensor | None = None,
+    pred_vol_logvar: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    recon_loss, parts = weighted_mse_loss(
-        pred_price, pred_volume, true_y, w_price, w_vol, price_scale, w_direction, direction_temperature
-    )
+    """reconstruction: "mse" (default, exactly today's behavior -- every existing config
+    is unaffected) or "nll" (see weighted_nll_loss). "nll" requires pred_price_logvar/
+    pred_vol_logvar (CVAEInpainting.decode()'s new outputs) and ignores price_scale
+    (see weighted_nll_loss's docstring for why)."""
+    if reconstruction == "mse":
+        recon_loss, parts = weighted_mse_loss(
+            pred_price, pred_volume, true_y, w_price, w_vol, price_scale, w_direction, direction_temperature
+        )
+    elif reconstruction == "nll":
+        if pred_price_logvar is None or pred_vol_logvar is None:
+            raise ValueError("reconstruction='nll' requires pred_price_logvar and pred_vol_logvar")
+        recon_loss, parts = weighted_nll_loss(
+            pred_price, pred_price_logvar, pred_volume, pred_vol_logvar, true_y,
+            w_price, w_vol, w_direction, direction_temperature,
+        )
+    else:
+        raise ValueError(f"unknown reconstruction mode: {reconstruction!r}")
 
     kl = kl_diag_gaussians(mu_q, logvar_q, mu_p, logvar_p)
     kl = torch.clamp(kl, min=free_bits)  # free-bits floor: guards against posterior collapse

@@ -1,0 +1,50 @@
+seed: 42
+device: auto  # auto | cpu | mps | cuda
+data_path: steven/data/spy_ohlcv_1h.parquet
+
+# Comparison baseline for configs/cvae_generative.yaml's NLL upgrade -- identical
+# architecture/momentum-features/w_direction=0 recipe, but reconstruction left at the
+# original "mse" mode. The decoder still emits a (mean, logvar) pair (that's a fixed
+# property of CVAEInpainting now, not a per-config choice -- the old 15-output decoder
+# shape no longer exists), but the loss ignores logvar entirely, so this checkpoint
+# isolates the *loss* as the single changed variable rather than comparing against the
+# stale pre-upgrade cvae_checkpoint.pt (which can't even load into the new decoder shape
+# -- see cvae_inpainting.py's decoder width change, 15->30 outputs).
+momentum_features:
+  enabled: true
+  vix_data_path: steven/data/vix_daily_yfinance.parquet
+
+model:
+  hidden: 32
+  ctx_dim: 64
+  z_dim: 8
+  decoder_hidden: 128
+  ctx_dropout: 0.3
+  decoder_ctx_dim: 8
+
+loss:
+  w_price: 1.0
+  w_vol: 0.5
+  use_price_scale: true
+  kl_cycles: 3
+  kl_ramp_fraction: 0.5
+  free_bits: 0.15
+  w_direction: 0.0
+  direction_temperature: 0.003
+  reconstruction: mse
+
+train:
+  max_epochs: 30
+  train_windows_per_epoch: 20000
+  windows_per_eval_set: 3000
+  batch_size: 512
+  lr: 0.0006
+  weight_decay: 0.0001
+  num_workers: 0
+  pin_memory: true
+
+inference:
+  num_samples: 5
+
+output:
+  checkpoint_path: steven/outputs/cvae_checkpoint_generative_mse_baseline.pt
