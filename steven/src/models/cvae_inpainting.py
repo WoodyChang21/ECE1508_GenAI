@@ -52,11 +52,12 @@ class CVAEInpainting(nn.Module):
         decoder_hidden: int = 128,
         ctx_dropout: float = 0.0,
         decoder_ctx_dim: int | None = None,
+        in_channels: int = N_CHANNELS,
     ):
         super().__init__()
         self.z_dim = z_dim
-        self.context_encoder = ConvEncoder(hidden=hidden, out_dim=ctx_dim)
-        self.recognition_encoder = ConvEncoder(hidden=hidden, out_dim=ctx_dim)
+        self.context_encoder = ConvEncoder(in_channels=in_channels, hidden=hidden, out_dim=ctx_dim)
+        self.recognition_encoder = ConvEncoder(in_channels=in_channels, hidden=hidden, out_dim=ctx_dim)
 
         self.prior_head = nn.Linear(ctx_dim, 2 * z_dim)
         self.recognition_head = nn.Linear(ctx_dim, 2 * z_dim)

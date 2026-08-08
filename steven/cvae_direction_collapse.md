@@ -318,3 +318,244 @@ pattern was a favorable roll against this one 1.37-year test path rather than a 
 didn't exist yet when it was current — everything measured *since* has been indistinguishable
 from noise). See discussion with the user before deciding whether to reproduce this config
 as a baseline to compare against, or to treat it as a data point rather than a target.
+
+## Momentum-feature enrichment (EMA9/EMA21) — also didn't fix it
+
+`daily_signal_probe.md` flagged richer conditioning inputs (VIX/RSI/MACD/Bollinger Bands from
+`data/processed/features.parquet`) as the safer alternative to changing sampling frequency —
+more informative context, without touching what the model is asked to reconstruct. Tested the
+smallest version of that idea first: `src/momentum_pipeline.py` adds two causal, z-scored
+features computed from the hourly close series — `ema_cross_norm` (`log(ema9/ema21)`, the
+classic golden-cross/death-cross signal) and `trend_position_norm` (`log(close/ema21)`,
+where price sits relative to the slower trend line). Both are functions of the close price
+CVAE is predicting, so both get masked to 0 at horizon positions exactly like the existing
+price/volume channels — verified directly (`masked_tensor`'s horizon rows read exactly `0.0`
+for both new columns; `full_tensor`'s read the true values) before trusting any training run
+against them. Stayed on the hourly pipeline (single-variable test — only the input features
+changed, not sampling frequency, config, or context length). `CVAEInpainting` gained an
+`in_channels` param (default preserves the existing 9-channel behavior) so the encoder could
+actually consume the 2 extra channels (11 total with padding/target masks).
+
+Full 30-epoch retrain (`probe_momentum_cvae.py`, `configs/cvae_momentum.yaml` — otherwise
+identical recipe to `configs/cvae.yaml`) against real weights:
+
+- Direction BCE (`dir=`) settled at **0.729** — again barely above `ln(2)≈0.693` chance level,
+  the same as the `w_direction`-only run.
+- `body_ret` variance ratio **0.606** (still <1, collapsed) — same signature as every
+  previous run.
+- Correlation with 10-bar trend: **r=-0.122** (N=300) — still squarely inside the noise band
+  every prior checkpoint has landed in (-0.03, -0.03, +0.10, +0.146, and now this).
+- Walk-forward: 17/2363 decisions traded, **total_return -0.32%**, 82.4% win rate on those 17
+  — collapsed to a near-zero/slightly-negative constant (mean predicted return -0.0055%, only
+  33.3% of test windows even eligible), the same "which side of the trading threshold an
+  arbitrary constant happens to land on" pattern as the daily-bars cross-run check above, not
+  a working strategy.
+
+This is now **six** independent interventions (loss-scale correction, architectural context
+bottleneck, auxiliary direction classification loss, daily-bars resampling, a cross-run
+stability check, and now momentum-feature enrichment) that have each converged on the same
+outcome: CVAE settles on a small, nearly context-independent constant for `body_ret`/
+`open_ret`, and neither changing the loss, the architecture, the sampling frequency, nor the
+input features has produced a correlation with real market direction distinguishable from
+noise.
+
+## Adding RSI-14 broke the collapse pattern, but not in a useful way
+
+Discussed with the user: MACD was deliberately skipped as the next feature to add, since it's
+itself an EMA-difference construction (`EMA12-EMA26`) -- the same category of signal as
+`ema_cross` above, which already tested null, so it would mostly re-test something already
+disproven rather than add real information. RSI-14 (Wilder's formulation, z-scored, added as
+a third momentum channel alongside the existing two, same leakage-masking treatment verified
+directly again before trusting a run against it) is a genuinely different construction --
+average-gain/average-loss ratio, not a trend slope -- so it was added instead.
+
+Full retrain (same config, only the extra `rsi_norm` channel changed) produced a real
+qualitative shift, not just another null result:
+
+| | EMA-only (previous) | + RSI-14 |
+|---|---|---|
+| `body_ret` variance ratio | 0.606 (<1, collapsed) | **1.156 (>1, for the first time)** |
+| correlation with 10-bar trend | -0.122 | -0.014 |
+| predicted-return spread (p5 to p95) | -0.025% to +0.012% (tight) | **-0.009% to +0.024% (real spread)** |
+| walk-forward trades | 17/2363 | **184/2029** |
+| walk-forward total_return | -0.32% | **-4.29%** |
+| win_rate | 82.4% | **90.8%** |
+
+For the first time across every intervention tried, the model stopped emitting a
+near-constant `body_ret` -- across-window variance now genuinely exceeds the model's own
+sampling noise, and it's trading 10x more often. But this is **not** the fix it might look
+like at first glance: correlation with real trend is still statistically indistinguishable
+from zero (-0.014, same noise band as always), and the backtest result got *worse*, not
+better. A 90.8% win rate combined with a *negative* total return is the signature of the
+asymmetric-payoff problem already documented in `evaluate.py`'s own module notes (CVAE's
+average loss running far larger than its average win, payoff ratio ~0.14) -- RSI gave the
+model more confidence to trade on what still isn't real directional information, and the
+existing loss/win size asymmetry punished the extra activity. In short: RSI changed *how
+often* and *how variably* CVAE trades, not *whether it's right* when it does.
+
+## Two more variables at once: rolling-window sampling + a real 1993-2025 daily model
+
+Discussed with the user next: switch training from `WindowSampler`'s random draw across 9
+context lengths (14-70 bars) to a new `RollingWindowSampler` (`data_pipeline.py`) -- ONE
+fixed context length, sliding by 1 bar, covering every valid window exactly once per epoch --
+and build a real daily-bars model (SPY's full 1993-2025 history via `yfinance`, not the
+~2010-2025 resample the earlier disposable probe used) alongside a matching hourly model, both
+enriched with the same EMA9/EMA21 + RSI-14 features. Explicit expectation set going in:
+random-vs-rolling window *selection* doesn't change the underlying context->direction
+relationship being learned, so this isn't expected to fix collapse on its own -- it's motivated
+by two separate real problems: (1) training's context length finally matches
+`WALK_FORWARD_CTX_BARS` exactly (today's random sampler trains across 9 lengths but evaluation
+only ever tests at 70), and (2) it removes an oversampling risk the daily-bars probe had and
+never fixed (`train_windows_per_epoch=20000`, a number picked for hourly's ~21k-row pool,
+overshot the old daily probe's ~3k-row pool by ~7x, ~199x exposure per row -- rolling makes
+"one epoch" mean "one real pass," at whatever pool size actually exists). Both models use a
+matched 10-trading-day context (hourly: 70 bars; daily: 10 bars) for a fair frequency
+comparison, not the hourly model's raw bar count. `RollingWindowSampler.pairs()` returns the
+same `(start_idx, ctx_bars)` shape `WindowSampler.draw` does, so `WindowDataset` needed no
+changes. Full 30-epoch retrains, `probe_momentum_rolling_cvae.py --frequency {hourly,daily}`:
+
+| | hourly (rolling, ctx=70) | daily (rolling, ctx=10, 1993-2025) |
+|---|---|---|
+| `body_ret` variance ratio | 0.620 (<1, collapsed) | 0.588 (<1, collapsed) |
+| correlation with 10-bar trend | **-0.004** | **+0.202** |
+| predicted-return mean / pct eligible | +0.027% / 91.7% | +0.046% / 83.3% |
+| walk-forward trades | 633/1131 | 174/243 |
+| win_rate | 89.9% | 86.2% |
+| total_return (stop_loss=0.02, hourly-calibrated) | +0.95% | -13.53% |
+| total_return (stop_loss=daily-calibrated p99, 0.0515) | n/a (hourly already uses 0.02 correctly) | **+1.80%** |
+| buy&hold / naive_periodic (same period) | +24.11% / -5.98% | +48.34% / +30.68% |
+
+**Hourly**: still collapsed by every measure (variance ratio <1, correlation ≈0) -- the
+positive +0.95% total_return is almost certainly a favorable constant-bias roll (a
+near-context-independent small positive `predicted_return` happened to land this training
+run), not evidence of skill, exactly like the earlier "different-signed collapsed constant"
+pattern documented above. Rolling-window sampling alone doesn't change hourly's story.
+
+**Daily is the most interesting result in this whole document**: r=+0.202 is meaningfully
+outside the noise band every other measurement across six prior interventions has landed in
+(-0.03 to +0.15). Caveat, and an important one: this is measured on 300 *randomly drawn,
+overlapping* windows from a test period of only ~590 valid daily starts -- the effective
+independent sample size behind that correlation is smaller than N=300 suggests, exactly the
+"stable across resamples, not a single lucky number" concern `daily_signal_probe.md` flagged
+in its own proposed significance bar. Worth re-checking on a non-overlapping or walk-forward
+resample before trusting it as a real edge, not just noting it and moving on.
+
+**Found and fixed a real bug while investigating why an 86% win rate produced a *negative*
+total_return**: `stop_loss_pct=0.02` (evaluate.py's shared default) was calibrated
+specifically against *hourly* 3-bar move sizes ("just outside the training data's own
+empirical p99 |anchored log return|, ~1.9%" -- see evaluate.py's module note). Daily 3-bar
+(3-day) moves are naturally much larger, so reusing 0.02 there was tightening the stop far
+past what daily volatility actually looks like -- converting ordinary daily-scale noise into
+forced stop-outs on trades that would otherwise have been fine. Recomputing the same
+`train_exit_return_bound` p99 diagnostic already used to calibrate the take-profit shrink
+(0.0515 for this run, not 0.02) and using *that* as the daily stop-loss instead flipped total
+return from -4.90% to **+1.80%** on the identical trained checkpoint and otherwise-identical
+trades. `probe_momentum_rolling_cvae.py` now derives stop_loss_pct from `sell_bound` for the
+daily frequency rather than reusing the hourly-tuned constant. Real methodological lesson
+independent of the collapse question: any shared-across-frequencies constant calibrated once
+against one frequency's data (`sell_bound` was already handled correctly; the stop-loss
+wasn't) needs re-deriving, not reusing, when the underlying bar scale changes.
+
+Even after that fix, +1.80% total_return is still far below buy&hold's +48.34% over the same
+daily test period -- this isn't a working strategy yet, just no longer an artificially
+sabotaged one. Whether the r=+0.202 correlation is a real, exploitable signal or a fortunate
+roll on ~590 overlapping test windows is the open question to resolve next, before investing
+further in the daily-momentum direction.
+
+## Adding VIX (CBOE put/call ratio checked and ruled out)
+
+Investigated CBOE's total/equity/index put/call ratio as a second sentiment source alongside
+VIX -- real, freely downloadable CSVs exist (`cdn.cboe.com/resources/options/
+volume_and_call_put_ratios/{totalpc,equitypc,indexpcarchive}.csv`), but they stop at
+**2019-10-04** (CBOE discontinued the free feed and moved current data behind their paid
+DataShop product). That's before every test period this project uses (2023-2025 daily,
+2024-2025 hourly) -- unusable for backtesting here regardless of effort spent scraping it.
+Ruled out; not pursued further.
+
+VIX itself (`src/collect_vix_yfinance.py`, full 1993-2025 history, same source/discipline as
+the SPY daily pull) was added as a third momentum-adjacent feature (`vix_norm` in
+`src/momentum_pipeline.py`) -- unlike EMA/RSI, a genuine market-derived sentiment/fear proxy
+external to SPY's own price history, not a transform of it. Shifted by one trading day before
+merging (`add_vix_feature`, `merge_asof(direction="backward")`) so each row gets the *prior*
+day's VIX close -- literally "before today's open," not the same-day value. Verified directly
+before trusting a run: no NaNs, correct prior-day alignment (spot-checked against the raw VIX
+file), and horizon masking confirmed (`masked_tensor` reads exactly `0.0` at horizon
+positions, `full_tensor` reads the true shifted value).
+
+Full retrain, both frequencies, VIX added on top of EMA9/EMA21+RSI-14 (otherwise identical to
+the rolling-window runs above):
+
+| | daily, EMA+RSI only | **daily, +VIX** | hourly, EMA+RSI only | **hourly, +VIX** |
+|---|---|---|---|---|
+| correlation with trend | +0.202 | **-0.104** | -0.004 | +0.010 |
+| pct eligible | 83.3% | 99.7% | 91.7% | 100.0% |
+| trades | 174/243 | **197/197** | 633/1131 | **799/799** |
+| total_return | +1.80% (stop-loss fixed) | -14.17% | +0.95% | +7.64% |
+
+**VIX regressed the one promising result in this document.** The daily model's r=+0.202
+dropped back to -0.104 (squarely back in the noise band) once VIX was added, and both models
+collapsed into trading *every single decision* with an extremely tight, always-positive
+predicted-return band -- a different failure signature than anything seen before (partial
+eligibility, at least some selectivity). Read together with VIX tending to run low during
+both models' training years (a mostly bull-trending stretch): this looks like the model
+learned "VIX low → predict the market's own unconditional positive drift almost always,"
+i.e. re-deriving the equity risk premium from a regime proxy, not learning anything
+conditional about direction. Hourly's total_return jumping to +7.64% likely the same
+mechanism as the earlier "+0.95%" and "+7.64%"-adjacent constant-bias rolls already
+documented -- a favorable bias that happens to match this test period's own upward drift, not
+evidence of skill (correlation stayed at noise level, +0.010).
+
+**Decision (discussed with the user): keep VIX in the pipeline anyway, revisit later.** Not
+because this result argues for it -- it doesn't -- but because a single retrain isn't enough
+to distinguish "VIX genuinely hurts" from "the daily correlation number was never stable to
+begin with." The bigger, still-open finding this surfaces: **r=+0.202 → -0.104 from one added
+feature means that number was volatile, not a stable signal** -- reinforcing rather than
+resolving the "is this real or a lucky draw on ~590 overlapping windows" question flagged
+above. Next step, before adding anything else (a Kalman-filtered trend feature was discussed
+and deferred for the same reason -- see chat): re-run the EMA+RSI-only daily config across
+multiple seeds/resamples to see whether +0.202 reproduces at all, or was itself already noise.
+
+## Resolved: r=+0.202 was training-seed noise, not a real signal
+
+`robustness_check_momentum.py` separates the two distinct sources of variance the question
+above conflated, both against the pre-VIX daily config (`include_vix=False`, EMA9/EMA21+
+RSI-14 only -- momentum_pipeline.py gained an `include_vix` toggle, defaulting to `True` per
+the decision above, purely to make this controlled comparison possible):
+
+1. **Training-seed variance**: same config, 5 different training seeds (42-46), each
+   evaluated with the same fixed `eval_seed=123` -- isolates how much the correlation moves
+   from training randomness alone, holding the evaluation sample fixed.
+2. **Evaluation-sampling variance**: the *same* trained model (seed=42), re-evaluated with 5
+   different `eval_seed`s -- isolates how much the correlation moves just from which ~300 (of
+   ~590 available, heavily overlapping) test windows get drawn, holding the model fixed.
+
+| | training-seed variance (5 seeds) | evaluation-sampling variance (1 model, 5 reseeds) |
+|---|---|---|
+| correlations | +0.150, +0.206, -0.010, +0.290, -0.170 | +0.150, +0.206, +0.147, +0.116, +0.144 |
+| mean | +0.093 | +0.153 |
+| std | **0.164** | 0.030 |
+| range | **-0.170 to +0.290** | +0.116 to +0.206 |
+
+**Verdict: the correlation number is dominated by training-seed randomness, not evaluation
+noise.** Holding the model fixed, the correlation estimate is fairly stable (std=0.03) --
+the "effective N smaller than 300" overlapping-windows concern turns out to be a comparatively
+minor contributor. But across 5 different training seeds of the *identical* config, the
+correlation ranges from -0.170 to +0.290 -- swinging from clearly negative to clearly
+positive depending purely on which random seed the training run happened to use. A std of
+0.164 comfortably covers every single-run correlation number reported anywhere in this
+document for the daily model (+0.202 pre-VIX, -0.104 post-VIX, and everything in between).
+**+0.202 was not a real, reproducible signal -- it was one favorable draw from a
+training-seed distribution centered near zero (mean +0.093, well within noise of 0).** VIX's
+apparent "regression" to -0.104 needs no separate explanation beyond this: it's just another
+draw from the same noisy distribution, not evidence VIX specifically hurt anything.
+
+**Methodological lesson for everything else in this document, not just this one number**:
+every single-run correlation reported above (hourly and daily alike, across all seven+
+interventions) carries this same training-seed-variance risk and was never checked against
+it. This doesn't retroactively invalidate the qualitative pattern (all of them landing in a
+similar noise-centered range is itself consistent with "no real signal," which is the
+conclusion the whole document has been converging toward anyway) -- but it does mean no
+*individual* number in this document should be treated as more precise than it is. Any future
+claim of the form "this change moved the correlation from X to Y" needs multiple seeds to
+mean anything; a single before/after comparison cannot distinguish a real effect from
+training noise with a spread this wide.

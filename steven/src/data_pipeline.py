@@ -263,6 +263,36 @@ class WindowSampler:
         return pairs
 
 
+class RollingWindowSampler:
+    """Deterministic sliding-window sampler over [lo, hi) at a SINGLE fixed context length --
+    "one epoch" means one full pass over every valid window exactly once, unlike
+    WindowSampler.draw's random draw (a config-picked count, which can over- or under-sample
+    the real pool depending on how it compares to len(valid_starts) -- see
+    cvae_direction_collapse.md's "momentum enrichment" discussion for a case where this
+    silently caused ~200x oversampling on a much smaller daily pool).
+
+    step=1 (default) is maximal overlap/reuse: consecutive windows share all but one bar of
+    context, but every possible window gets used once per pass, and DataLoader's own shuffling
+    still randomizes minibatch order within that pass. Returns (start_idx, ctx_bars) pairs in
+    the same shape WindowSampler.draw does, so WindowDataset needs no changes to consume
+    either sampler."""
+
+    def __init__(self, lo: int, hi: int, ctx_bars: int, step: int = 1):
+        self.lo = lo
+        self.hi = hi
+        self.ctx_bars = ctx_bars
+        self.step = step
+
+    def valid_starts(self) -> np.ndarray:
+        last_start = self.hi - self.ctx_bars - HORIZON  # inclusive
+        if last_start < self.lo:
+            return np.empty(0, dtype=np.int64)
+        return np.arange(self.lo, last_start + 1, self.step, dtype=np.int64)
+
+    def pairs(self) -> list[tuple[int, int]]:
+        return [(int(s), self.ctx_bars) for s in self.valid_starts()]
+
+
 def build_window(
     feat: np.ndarray, opens: np.ndarray, closes: np.ndarray, start_idx: int, ctx_bars: int
 ) -> dict:
