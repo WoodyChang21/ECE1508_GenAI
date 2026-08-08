@@ -1,0 +1,46 @@
+# Reproduces commit 2c4ad99's CVAE config exactly -- the best walk-forward result CVAE has
+# produced (+6.79% total return, 66.4% trade rate), from before price_scale, decoder_ctx_dim,
+# and w_direction existed. A controlled comparison, not a recommended training config: run
+# this alongside configs/cvae.yaml (writes to a separate checkpoint_path below) to check
+# whether the "fixes" since then actually made direction prediction any better, or whether
+# 2c4ad99's result was a favorable roll against one test path. See cvae_direction_collapse.md's
+# "Revisiting the pre-collapse-chasing checkpoint" section.
+seed: 42
+device: auto  # auto | cpu | mps | cuda
+data_path: steven/data/spy_ohlcv_1h.parquet
+
+model:
+  hidden: 32
+  ctx_dim: 64
+  z_dim: 8
+  decoder_hidden: 128
+  ctx_dropout: 0.3
+  # decoder_ctx_dim omitted -- None (identity), matching 2c4ad99 (this param didn't exist yet)
+
+loss:
+  w_price: 1.0
+  w_vol: 0.5
+  kl_cycles: 3
+  kl_ramp_fraction: 0.5
+  free_bits: 0.15
+  use_price_scale: false  # matches 2c4ad99 exactly -- this param didn't exist yet, and the
+                           # code path it controls (price_scale correction) didn't either
+  w_direction: 0.0  # off -- didn't exist yet at 2c4ad99
+  direction_temperature: 0.003  # unused when w_direction=0.0
+
+train:
+  max_epochs: 30
+  train_windows_per_epoch: 20000
+  windows_per_eval_set: 3000
+  batch_size: 512
+  lr: 0.0006
+  weight_decay: 0.0001
+  num_workers: 0
+  pin_memory: true
+
+inference:
+  num_samples: 5
+
+output:
+  # separate from cvae.yaml's checkpoint -- keeps both checkpoints around for comparison
+  checkpoint_path: steven/outputs/cvae_checkpoint_pre_fix_repro.pt

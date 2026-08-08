@@ -19,6 +19,13 @@ model:
 loss:
   w_price: 1.0
   w_vol: 0.5
+  # Divides price components by their train-set std before computing price_loss (see
+  # losses.py's weighted_mse_loss docstring). true reproduces the fix from
+  # cvae_direction_collapse.md; false reproduces the pre-fix loss scale exactly, for
+  # controlled comparison against commit 2c4ad99's checkpoint (see
+  # configs/cvae_pre_fix_repro.yaml and cvae_direction_collapse.md's "Revisiting the
+  # pre-collapse-chasing checkpoint" section).
+  use_price_scale: true
   # was a single 0->1 ramp over 5 epochs then flat at 1.0 for the rest -- cyclical
   # annealing instead (Fu et al. 2019): 3 cycles across training, each ramping 0->1 over
   # its first half then holding, so the decoder gets repeated chances to learn to use z

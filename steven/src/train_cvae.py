@@ -138,12 +138,18 @@ def main() -> None:
     # (FEATURE_COLS order), already raw log-returns -- unlike log_volume_norm, they're
     # never z-scored, so their ~1e-6 variance is dwarfed by volume's unit variance in
     # weighted_mse_loss unless rescaled here. train-set std only, same split discipline
-    # as fit_normalize.
+    # as fit_normalize. use_price_scale=false reproduces the pre-fix loss scale exactly
+    # (see configs/cvae.yaml's comment) -- a controlled comparison against commit
+    # 2c4ad99's checkpoint, not a recommended setting.
     train_lo, train_hi = bounds["train"]
-    price_scale = torch.tensor(
-        feat[train_lo:train_hi, :4].std(axis=0), dtype=torch.float32, device=device
-    )
-    logger.info("price_scale (open_ret, body_ret, upper_wick, lower_wick): %s", price_scale.tolist())
+    if cfg["loss"]["use_price_scale"]:
+        price_scale = torch.tensor(
+            feat[train_lo:train_hi, :4].std(axis=0), dtype=torch.float32, device=device
+        )
+        logger.info("price_scale (open_ret, body_ret, upper_wick, lower_wick): %s", price_scale.tolist())
+    else:
+        price_scale = None
+        logger.info("price_scale: disabled (use_price_scale=false)")
 
     train_sampler = WindowSampler(*bounds["train"])
     val_sampler = WindowSampler(*bounds["val"])
