@@ -249,12 +249,33 @@ CVAE-specific gap beyond whatever the shared difficulty is — the VAE informati
   retrain, which isn't actually diagnostic for this experiment (see `backlog.md`), but the call
   was made to go straight to the architectural lever below instead of waiting the loss-reweighting
   experiment out. Not a negative result — genuinely untested to completion.
-- [ ] **Architectural: bottleneck the decoder's own view of context (`decoder_ctx_dim`,
-  `src/models/cvae_inpainting.py`), decoupling it from the richer representation the prior
-  sees.** `ctx_dropout=0.3` only weakens the decoder's context bypass stochastically during
-  training; `decoder_ctx_dim` (now in `configs/cvae.yaml`, set to 8 vs. `ctx_dim`'s 64) adds a
-  permanent, deterministic projection down to a much smaller dimension before the decoder ever
-  sees it, so it can't cheaply reconstruct fine detail from context alone at inference time
-  either — forcing more of the reconstruction burden onto `z`. Untested pending a retrain; recheck
-  with the same three signals used above: generated spread vs. real market spread, per-bar
-  `body_ret` variation across different windows, and correlation with a trend signal.
+- [x] **Architectural: bottleneck the decoder's own view of context (`decoder_ctx_dim`,
+  `src/models/cvae_inpainting.py`)** — tried, checked against a real retrain, **did not fix
+  collapse.** Rechecked with the same three signals used for the `price_scale` fix, against
+  checkpoint `72147bb`:
+  - Across/within-window `body_ret` variance ratio: **0.91** — actually below 1 (collapsed),
+    slightly worse than the `price_scale`-only checkpoint's 1.08.
+  - Correlation with a 10-bar trend signal: **r=+0.10** (N=100) — up from -0.03, but still
+    within noise range at this sample size.
+  - Practical effect on the walk-forward backtest was dramatic, though: predicted return
+    (`take_profit` vs. `close_0`) across 300 fresh test windows was **negative on 100% of
+    them** (mean -0.09%, tightly clustered -0.12% to -0.06%), vs. the previous checkpoint's
+    near-universal *positive* bias. CVAE went from trading on ~99.9% of decisions to 0%.
+  - Read together: the model still emits an almost context-independent constant either way —
+    this retrain just landed on a **different-signed** constant (mean `body_ret` -0.00135, or
+    ~47% of real train std, a large systematic offset, not small noise) than the previous run
+    did. That's consistent with "a different arbitrary collapsed fixed point from a fresh
+    training run," not "the bottleneck reduced collapse." Left in place (doesn't hurt,
+    combines with whatever fixes collapse for real) but not the fix on its own.
+  - Side effect worth remembering: this is also why `n_decisions` jumped from ~800 to 2397 in
+    this run without the test period changing — see the walk-forward advance-rule item above.
+- [ ] **Auxiliary direction loss (`w_direction`/`direction_temperature` in `configs/cvae.yaml`,
+  `losses.py`)** — tried next, since neither loss-scale correction nor an architectural
+  bottleneck gave plain MSE enough signal to stop `body_ret` from collapsing to *some*
+  constant. Adds a binary cross-entropy term on the sign of `per_bar_close_return`
+  (`open_ret + body_ret` — the same quantity PatchTST's own quality gate checks the sign of,
+  and exactly what `exit_price_from_components`'s take-profit target is built from), a much
+  more direct classification-style signal than an MSE term ever gives for a binary-ish
+  property like direction. Untested pending a retrain; recheck with the same three signals
+  above, plus specifically whether the predicted-return distribution (vs. `close_0`) actually
+  spans both signs instead of being uniformly one-signed.

@@ -26,6 +26,14 @@ loss:
   kl_cycles: 3
   kl_ramp_fraction: 0.5
   free_bits: 0.15  # was 0.05 -- same idea as z_dim: force more real signal per dim, not more dims
+  # new -- auxiliary BCE loss on per_bar_close_return's sign (see losses.py's
+  # weighted_mse_loss docstring). Plain MSE wasn't enough gradient signal to stop
+  # body_ret from collapsing to a near-constant value -- the decoder_ctx_dim bottleneck
+  # above didn't fix this either, it just landed on a different collapsed constant (see
+  # cvae_direction_collapse.md). A much more direct classification-style signal on
+  # direction, on top of everything else already tried.
+  w_direction: 1.0
+  direction_temperature: 0.003  # ~ real body_ret train std -- keeps the BCE logit's steep region where real moves live
 
 train:
   max_epochs: 30

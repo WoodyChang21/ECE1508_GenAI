@@ -73,7 +73,10 @@ def collate(batch: list[dict]) -> dict:
 
 def run_epoch(model, loader, optimizer, loss_cfg, beta, price_scale, device, train: bool) -> dict:
     model.train(mode=train)
-    totals = {"loss": 0.0, "price_loss": 0.0, "vol_loss": 0.0, "recon_loss": 0.0, "kl_loss": 0.0}
+    totals = {
+        "loss": 0.0, "price_loss": 0.0, "vol_loss": 0.0, "direction_loss": 0.0,
+        "recon_loss": 0.0, "kl_loss": 0.0,
+    }
     n = 0
     for batch in loader:
         masked_tensor = batch["masked_tensor"].to(device)
@@ -86,6 +89,7 @@ def run_epoch(model, loader, optimizer, loss_cfg, beta, price_scale, device, tra
                 price, volume, y, mu_q, logvar_q, mu_p, logvar_p,
                 loss_cfg["w_price"], loss_cfg["w_vol"], beta, loss_cfg["free_bits"],
                 price_scale=price_scale,
+                w_direction=loss_cfg["w_direction"], direction_temperature=loss_cfg["direction_temperature"],
             )
 
         if train:
@@ -97,6 +101,7 @@ def run_epoch(model, loader, optimizer, loss_cfg, beta, price_scale, device, tra
         totals["loss"] += loss.item() * bs
         totals["price_loss"] += parts["price_loss"] * bs
         totals["vol_loss"] += parts["vol_loss"] * bs
+        totals["direction_loss"] += parts["direction_loss"] * bs
         totals["recon_loss"] += parts["recon_loss"] * bs
         totals["kl_loss"] += parts["kl_loss"] * bs
         n += bs
@@ -182,10 +187,11 @@ def main() -> None:
         val_metrics = run_epoch(model, val_loader, optimizer, cfg["loss"], beta, price_scale, device, train=False)
 
         logger.info(
-            "epoch %d/%d  beta=%.2f  train_recon=%.5f (kl=%.4f)  val_recon=%.5f (kl=%.4f)  (%.1fs)",
+            "epoch %d/%d  beta=%.2f  train_recon=%.5f (kl=%.4f dir=%.4f)  "
+            "val_recon=%.5f (kl=%.4f dir=%.4f)  (%.1fs)",
             epoch + 1, max_epochs, beta,
-            train_metrics["recon_loss"], train_metrics["kl_loss"],
-            val_metrics["recon_loss"], val_metrics["kl_loss"],
+            train_metrics["recon_loss"], train_metrics["kl_loss"], train_metrics["direction_loss"],
+            val_metrics["recon_loss"], val_metrics["kl_loss"], val_metrics["direction_loss"],
             time.time() - t0,
         )
 

@@ -123,11 +123,24 @@ specific experiment (it doesn't track loss-scale rebalancing between price and v
 same in every cyclical-annealing hold-phase regardless) -- this was an early stop by choice, not a
 result showing the idea doesn't work.
 
-**Now trying the architectural lever instead**: `decoder_ctx_dim` (`src/models/cvae_inpainting.py`,
+**Tried the architectural lever next**: `decoder_ctx_dim` (`src/models/cvae_inpainting.py`,
 `configs/cvae.yaml`) bottlenecks the decoder's own view of context to a much smaller dimension (8,
 vs. `ctx_dim`'s 64) than what the prior sees -- a permanent, deterministic version of what
-`ctx_dropout` only does stochastically during training, so the decoder can't cheaply reconstruct fine
-detail from context alone even at inference time and has to lean on `z` more. Untested pending a
+`ctx_dropout` only does stochastically during training. **Checked against a real retrain (checkpoint
+`72147bb`) -- did not fix collapse.** Across/within-window `body_ret` variance ratio came back at 0.91
+(collapsed, and slightly worse than the `price_scale`-only checkpoint's 1.08); correlation with trend
+ticked up from -0.03 to +0.10 but that's still noise-level at N=100. The visible walk-forward effect
+was large, though: this checkpoint's predicted return vs. `close_0` was negative on 100% of 300 tested
+windows (CVAE went from trading on ~99.9% of decisions to 0%) -- but that's because this run's
+collapsed constant happens to be negatively signed, not because the model got worse at using context;
+the previous run's collapsed constant was positively signed instead. Read as "a different arbitrary
+collapsed fixed point," not evidence the bottleneck itself helps or hurts. Left in the config (doesn't
+hurt) but isn't the fix. Full numbers in `cvae_direction_collapse.md`'s To-do list.
+
+**Now trying an auxiliary direction loss instead**: `w_direction`/`direction_temperature`
+(`configs/cvae.yaml`, `src/losses.py`) add a binary cross-entropy term on the sign of
+`per_bar_close_return` (`open_ret + body_ret`) -- a much more direct classification-style gradient
+for a binary-ish property like direction than plain MSE was ever giving it. Untested pending a
 retrain; see `cvae_direction_collapse.md`'s To-do for the recheck plan.
 
 ## "Trade confidence" redesign (alias: **trade confidence**) -- implemented (2026-08-07)
