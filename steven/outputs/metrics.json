@@ -1,65 +1,35 @@
 {
-  "walk_forward": {
-    "ctx_bars": 70,
+  "random_sample": {
+    "n_test_windows": 100,
     "patchtst_min_return_threshold": 0.001,
     "cvae_min_return_threshold": 0.0002,
     "stop_loss_pct": 0.02,
-    "buy_and_hold": {
-      "entry_date": "2024-01-16",
-      "entry_price": 474.95,
-      "exit_date": "2025-05-30",
-      "exit_price": 589.46,
-      "elapsed_years": 1.3689253935660506,
-      "total_return": 0.24109906305926954,
-      "annual_return": 0.17091564847596086
-    },
-    "naive_periodic": {
-      "n_trades": 799,
-      "total_return": -0.059779547561431445,
-      "win_rate": 0.5206508135168961,
-      "take_profit_rate": null,
-      "avg_return": -5.936168685935741e-05,
-      "entry_date": "2024-01-17",
-      "entry_price": 471.84,
-      "exit_date": "2025-05-30",
-      "exit_price": 588.29,
-      "elapsed_years": 1.3666438512434405,
-      "annual_return": -0.044101798997640995
-    },
     "patchtst": {
-      "n_decisions": 1477,
-      "n_trades": 460,
+      "n_decisions": 100,
+      "n_trades": 13,
       "outcome_breakdown": {
-        "win_take_profit": 0.12863913337846988,
-        "win_expiry": 0.06838185511171294,
-        "lose_expiry": 0.11103588354773189,
-        "lose_stop_loss": 0.003385240352064997,
-        "skipped": 0.6431956668923493,
-        "no_trade": 0.04536222071767095
+        "win_take_profit": 0.04,
+        "win_expiry": 0.01,
+        "lose_expiry": 0.08,
+        "lose_stop_loss": 0.0,
+        "skipped": 0.79,
+        "no_trade": 0.08
       },
-      "total_return": 0.09317390513977708,
-      "win_rate": 0.6326086956521739,
-      "take_profit_rate": 0.41304347826086957,
-      "avg_return": 0.00020386598939481045,
-      "entry_date": "2024-01-17",
-      "entry_price": 471.84,
-      "exit_date": "2025-05-30",
-      "exit_price": 585.8900344848633,
-      "elapsed_years": 1.3665297741273101,
-      "annual_return": 0.06736276353035153
+      "win_rate": 0.38461538461538464,
+      "take_profit_rate": 0.3076923076923077,
+      "avg_return": -0.001377188242398784
     },
     "cvae": {
-      "n_decisions": 2397,
+      "n_decisions": 100,
       "n_trades": 0,
       "outcome_breakdown": {
         "win_take_profit": 0.0,
         "win_expiry": 0.0,
         "lose_expiry": 0.0,
         "lose_stop_loss": 0.0,
-        "skipped": 0.0,
-        "no_trade": 1.0
+        "skipped": 0.12,
+        "no_trade": 0.88
       },
-      "total_return": 0.0,
       "win_rate": null,
       "take_profit_rate": null,
       "avg_return": null
