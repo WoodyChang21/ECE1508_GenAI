@@ -1,0 +1,82 @@
+{
+  "walk_forward": {
+    "checkpoint": "steven/outputs/patchtst_revin_novolume_overlap_channel_attention_false_checkpoint.pt",
+    "checkpoint_config": {
+      "model": {
+        "channel_attention": false,
+        "d_model": 64,
+        "num_attention_heads": 4,
+        "num_hidden_layers": 3,
+        "dropout": 0.1,
+        "head_dropout": 0.0,
+        "patch_length": 14,
+        "patch_stride": 7
+      },
+      "context_length": 70,
+      "data_path": "steven/data/spy_ohlcv_1h.parquet",
+      "seed": 0,
+      "target": "raw_price_revin_no_volume"
+    },
+    "ctx_bars": 70,
+    "confidence_threshold": 0.5,
+    "min_return_threshold": 0.001,
+    "buy_and_hold": {
+      "entry_date": "2024-01-16",
+      "entry_price": 474.95,
+      "exit_date": "2025-05-30",
+      "exit_price": 589.46,
+      "elapsed_years": 1.3689253935660506,
+      "total_return": 0.24109906305926954,
+      "annual_return": 0.17091564847596086
+    },
+    "naive_periodic": {
+      "n_trades": 799,
+      "total_return": -0.059779547561431445,
+      "win_rate": 0.5206508135168961,
+      "take_profit_rate": null,
+      "avg_return": -5.936168685935741e-05,
+      "entry_date": "2024-01-17",
+      "entry_price": 471.84,
+      "exit_date": "2025-05-30",
+      "exit_price": 588.29,
+      "elapsed_years": 1.3666438512434405,
+      "annual_return": -0.044101798997640995
+    },
+    "patchtst_revin": {
+      "n_decisions": 1873,
+      "n_trades": 584,
+      "outcome_breakdown": {
+        "win_take_profit": 0.2226374799786439,
+        "win_expiry": 0.013347570742124934,
+        "lose_expiry": 0.07581420181526963,
+        "skipped": 0.5056059797116925,
+        "no_trade": 0.1825947677522691
+      },
+      "total_return": 0.09677831224685951,
+      "win_rate": 0.7568493150684932,
+      "take_profit_rate": 0.714041095890411,
+      "avg_return": 0.00017663430542538028,
+      "avg_bars_held": 1.8972602739726028,
+      "entry_date": "2024-01-17",
+      "entry_price": 471.5199890136719,
+      "exit_date": "2025-05-30",
+      "exit_price": 585.7266845703125,
+      "elapsed_years": 1.366301619895049,
+      "annual_return": 0.06994906165940185
+    },
+    "confidence_calibration": [
+      {
+        "bin": "coherent-up (confidence=1)",
+        "n": 1379,
+        "win_rate": 0.7984046410442349,
+        "direction_accuracy": 0.5685279187817259
+      },
+      {
+        "bin": "not coherent-up (confidence=0)",
+        "n": 494,
+        "win_rate": 0.3481781376518219,
+        "direction_accuracy": 0.5364372469635628
+      }
+    ]
+  }
+}
