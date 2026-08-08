@@ -113,9 +113,22 @@ to `weighted_mse_loss`/`cvae_loss` in `src/losses.py`), and a re-check against t
 the fix produced a real, measurable improvement on one specific symptom (whether context explains more of
 `body_ret`'s variance than the model's own sampling noise, which flipped from *less* to *slightly more*),
 but CVAE's predicted scale for `body_ret` is still only ~6% of real market variability and shows no
-demonstrated correlation with a simple trend signal -- a genuine partial fix, not a resolved one. Worth
-trying next: dropping `w_vol` further (by another 2-3 orders of magnitude) to see whether that closes more
-of the gap, or whether this is a harder architectural ceiling tied to the VAE bottleneck itself.
+demonstrated correlation with a simple trend signal -- a genuine partial fix, not a resolved one.
+
+**Tried dropping `w_vol` further next, but reverted before a retrain finished** (`w_vol` 0.5 → 0.001,
+commit `d657937`, reverted in `3bc2989`) -- checked KL partway through the run, saw it still pinned
+at the same free-bits floor every retrain has shown since the KL-budget fix above, and decided that
+wasn't worth waiting on. Note that KL sitting at the floor mid-run isn't actually informative for this
+specific experiment (it doesn't track loss-scale rebalancing between price and volume, and looks the
+same in every cyclical-annealing hold-phase regardless) -- this was an early stop by choice, not a
+result showing the idea doesn't work.
+
+**Now trying the architectural lever instead**: `decoder_ctx_dim` (`src/models/cvae_inpainting.py`,
+`configs/cvae.yaml`) bottlenecks the decoder's own view of context to a much smaller dimension (8,
+vs. `ctx_dim`'s 64) than what the prior sees -- a permanent, deterministic version of what
+`ctx_dropout` only does stochastically during training, so the decoder can't cheaply reconstruct fine
+detail from context alone even at inference time and has to lean on `z` more. Untested pending a
+retrain; see `cvae_direction_collapse.md`'s To-do for the recheck plan.
 
 ## "Trade confidence" redesign (alias: **trade confidence**) -- implemented (2026-08-07)
 

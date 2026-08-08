@@ -243,8 +243,18 @@ CVAE-specific gap beyond whatever the shared difficulty is — the VAE informati
   point 3 in `v1.md`), and what it changes about the backtest (far fewer decision points
   overall, changes `n_decisions` denominators in `outcome_breakdown`, and changes what
   "consecutive" windows look like for any future diagnostic that walks decisions in order).
-- [ ] **Try dropping `w_vol` by ~2-3 orders of magnitude (or z-score price components for the
-  loss too) instead of the current `price_scale` division**, and see if closing the *remaining*
-  gap to PatchTST's predicted scale (CVAE is still at ~15% of PatchTST's own `body_ret` std) requires
-  a bigger loss-scale correction, a bigger `z_dim`, or is a harder architectural ceiling tied to the
-  VAE bottleneck itself.
+- [x] ~~Try dropping `w_vol` by ~2-3 orders of magnitude...~~ Started (`w_vol` 0.5 → 0.001,
+  commit `d657937`), but reverted before a retrain finished (commit `3bc2989`) — the KL number
+  checked partway through a run was pinned at the same free-bits floor seen in every prior
+  retrain, which isn't actually diagnostic for this experiment (see `backlog.md`), but the call
+  was made to go straight to the architectural lever below instead of waiting the loss-reweighting
+  experiment out. Not a negative result — genuinely untested to completion.
+- [ ] **Architectural: bottleneck the decoder's own view of context (`decoder_ctx_dim`,
+  `src/models/cvae_inpainting.py`), decoupling it from the richer representation the prior
+  sees.** `ctx_dropout=0.3` only weakens the decoder's context bypass stochastically during
+  training; `decoder_ctx_dim` (now in `configs/cvae.yaml`, set to 8 vs. `ctx_dim`'s 64) adds a
+  permanent, deterministic projection down to a much smaller dimension before the decoder ever
+  sees it, so it can't cheaply reconstruct fine detail from context alone at inference time
+  either — forcing more of the reconstruction burden onto `z`. Untested pending a retrain; recheck
+  with the same three signals used above: generated spread vs. real market spread, per-bar
+  `body_ret` variation across different windows, and correlation with a trend signal.

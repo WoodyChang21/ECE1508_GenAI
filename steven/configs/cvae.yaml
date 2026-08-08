@@ -8,6 +8,13 @@ model:
   z_dim: 8  # was 16 -- concentrate the KL budget into fewer, denser dims (see backlog.md)
   decoder_hidden: 128
   ctx_dropout: 0.3  # new -- weakens the decoder's direct context bypass (see backlog.md)
+  # new -- permanent, deterministic bottleneck on the decoder's OWN view of context (the
+  # prior still sees the full ctx_dim=64). An 8x reduction, matching z_dim, so the decoder
+  # can't cheaply reconstruct fine detail from context alone and has to lean on z instead.
+  # The architectural lever from backlog.md's CVAE posterior-collapse entry, tried after
+  # ctx_dropout alone (stochastic, training-only) wasn't enough to fix direction collapse
+  # (see cvae_direction_collapse.md).
+  decoder_ctx_dim: 8
 
 loss:
   w_price: 1.0

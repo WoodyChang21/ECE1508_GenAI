@@ -51,6 +51,7 @@ class CVAEInpainting(nn.Module):
         z_dim: int = 16,
         decoder_hidden: int = 128,
         ctx_dropout: float = 0.0,
+        decoder_ctx_dim: int | None = None,
     ):
         super().__init__()
         self.z_dim = z_dim
@@ -60,6 +61,17 @@ class CVAEInpainting(nn.Module):
         self.prior_head = nn.Linear(ctx_dim, 2 * z_dim)
         self.recognition_head = nn.Linear(ctx_dim, 2 * z_dim)
 
+        # Bottlenecks the decoder's OWN view of context to a much smaller dimension than
+        # what the prior sees (prior_head above still takes the full ctx_dim) -- a
+        # permanent, deterministic version of what ctx_dropout only does stochastically
+        # during training. Default None (identity, full ctx_dim) so old checkpoints saved
+        # without this param in their config (see evaluate.py, which reconstructs the
+        # model from a checkpoint's saved config dict) still load correctly.
+        self.decoder_ctx_dim = decoder_ctx_dim if decoder_ctx_dim is not None else ctx_dim
+        self.decoder_ctx_proj = (
+            nn.Linear(ctx_dim, decoder_ctx_dim) if decoder_ctx_dim is not None else nn.Identity()
+        )
+
         # Dropped only inside decode() (see below), never before prior_head -- the prior
         # still sees the full, clean context; only the decoder's direct context bypass is
         # weakened. Default 0.0 (identity) so old checkpoints saved without this param in
@@ -68,7 +80,7 @@ class CVAEInpainting(nn.Module):
         self.ctx_dropout = nn.Dropout(ctx_dropout)
 
         self.decoder = nn.Sequential(
-            nn.Linear(z_dim + ctx_dim, decoder_hidden),
+            nn.Linear(z_dim + self.decoder_ctx_dim, decoder_hidden),
             nn.ReLU(),
             nn.Linear(decoder_hidden, decoder_hidden),
             nn.ReLU(),
@@ -92,12 +104,16 @@ class CVAEInpainting(nn.Module):
         return mu + eps * std
 
     def decode(self, z: torch.Tensor, ctx_repr: torch.Tensor):
-        """ctx_dropout is applied here, not before -- weakens the decoder's direct,
-        always-available context signal (a classic posterior-collapse driver: if the
-        decoder can already reconstruct well from context alone, there's no loss pressure
-        to ever route information through z) without touching the prior's own view of
-        context. Standard nn.Dropout -- a no-op whenever the model is in eval() mode, so
-        inference (sample(), always preceded by .eval() -- see evaluate.py) is unaffected."""
+        """decoder_ctx_proj + ctx_dropout are applied here, not before -- both weaken the
+        decoder's direct, always-available context signal (a classic posterior-collapse
+        driver: if the decoder can already reconstruct well from context alone, there's no
+        loss pressure to ever route information through z) without touching the prior's
+        own view of context (prior_head, in encode_prior, sees the un-bottlenecked
+        ctx_repr). decoder_ctx_proj is a permanent, deterministic bottleneck (active at
+        both train and inference time); ctx_dropout on top of it is a no-op whenever the
+        model is in eval() mode, so inference (sample(), always preceded by .eval() --
+        see evaluate.py) only feels the projection, not the dropout."""
+        ctx_repr = self.decoder_ctx_proj(ctx_repr)
         ctx_repr = self.ctx_dropout(ctx_repr)
         raw = self.decoder(torch.cat([z, ctx_repr], dim=-1))
         price_raw = raw[:, :12].reshape(-1, 3, 4)
