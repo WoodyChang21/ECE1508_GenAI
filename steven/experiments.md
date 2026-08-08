@@ -719,3 +719,47 @@ as the two best individual results found so far.
 result diverges by setting, seed noise is a live concern here more than anywhere else on
 the branch, and multi-seed confirmation (currently deferred) would be especially valuable
 before treating either number as a stable estimate.
+
+## hf_patchtst_revin_no_volume_closeweighted (step 5: close-weighted loss)
+
+**What**: Step 5 of the training-pipeline-review plan, the last untested item -- upweights
+`close` in the RevIN MSE loss (`channel_weights = [1.0, 1.0, 1.0, CLOSE_WEIGHT=4.0]` in
+open/high/low/close order), since every trading-relevant quantity (`take_profit`,
+direction, coherence) depends only on predicted close. Tested on step 4's original
+`(7,7)` patch config, isolated from the patch-geometry findings -- same 20 epochs, flat
+LR=6e-4, no directional term, no schedule. Notebook:
+`steven/train_patchtst_hf_channel_attention.ipynb`.
+
+| Setting | OHLC RMSE ($) | Close RMSE ($) | Dir Acc (bar 1/2/3) | Coherence |
+|---|---|---|---|---|
+| baseline (unweighted), False | 3.1484 | -- | 0.5240 / 0.5403 / 0.5524 | 0.9741 |
+| baseline (unweighted), True | 3.2878 | -- | 0.5344 / 0.5440 / 0.5519 | 0.9875 |
+| closeweighted (4x), False | 3.2136 | **3.4782** | 0.5227 / 0.5411 / 0.5515 | 0.9554 |
+| closeweighted (4x), True | 3.4157 | **3.6743** | 0.5252 / 0.5386 / 0.5448 | 0.9666 |
+
+**Conclusion: null-to-negative on forecasting metrics, and a mildly counterintuitive one --
+close RMSE got *worse*, not better, despite the 4x weight.** Overall OHLC RMSE degrades for
+both settings (expected, since open/high/low lost relative weight), but close RMSE
+specifically -- 3.4782/3.6743 -- is not just worse than the unweighted baseline's overall
+RMSE, it's worse than this run's *own* overall RMSE, meaning close is now the worst-fit
+channel despite carrying 4x the loss weight. Directional accuracy is essentially flat
+(differences of 0.001-0.007 per bar, noise-level), and coherence drops meaningfully
+(0.974/0.988 -> 0.955/0.967). Upweighting the one channel that matters for trading didn't
+make that channel's predictions better, and cost some coherence for no directional gain --
+consistent with the branch's now-familiar pattern (directional loss showed the same
+shape: reweighting the loss toward a trading-relevant target doesn't reliably improve that
+target, and can cost coherence along the way).
+
+**Not yet backtested** -- forecasting metrics alone would suggest skipping a backtest (same
+reasoning applied to early-stopping/dirloss variants that showed below-chance directional
+accuracy), but per this branch's repeated finding that forecasting metrics don't reliably
+predict backtest quality in *either* direction (see the `(14,14)`/`False` result: a small
+forecasting regression preceded the best backtest on the branch), this is being backtested
+directly rather than skipped on the strength of the forecasting read alone. Backtest wired
+into `colab_train.ipynb`, not yet run.
+
+**Caveats**: one seed per setting; `CLOSE_WEIGHT=4.0` untuned/not swept -- if the backtest
+also comes back negative, a lower weight or dropping open/high/low from the loss entirely
+are the remaining untried variants on this specific lever, though given the pattern seen
+across every loss-reweighting attempt so far (directional loss, now this), further tuning
+here looks like a low-probability path.
