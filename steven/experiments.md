@@ -595,3 +595,47 @@ question (deferred for now per current plan) and step 5 (close-weighted loss).
 **Caveats**: same test window/methodology as every other backtest on this branch
 (2024-01 to 2025-05, bullish for SPY); one seed per setting, not yet confirmed against seed
 noise (multi-seed confirmation currently deferred).
+
+## hf_patchtst_revin_no_volume_patch14_14 (patch_length=14, patch_stride=14, no overlap)
+
+**What**: A wider patch-geometry sweep (`(10,10)`, `(10,5)`, `(14,14)`, `(21,7)`, crossed
+with both `channel_attention` settings) was run to follow up on the overlap winner
+`(14, 7)` -- but the Colab session disconnected before its checkpoints could be pushed;
+only the printed forecasting metrics survived (in the executed notebook, locally). That
+sweep's headline finding: `(10,10)`, `(10,5)`, and `(21,7)` all collapsed to below-chance
+directional accuracy, while `(14,14)` -- the key control, same length as the `(14,7)`
+winner but no overlap -- nearly matched `(14,7)`'s RMSE gain with *better* coherence
+(0.937/0.946 vs. 0.927/0.901) and dir acc solidly above chance. This pointed to patch
+length 14 itself, not overlap, being the real driver. This entry retrains just `(14,14)`
+(not the full sweep, to avoid losing another run to a disconnect) to get a pushable,
+backtestable checkpoint. Notebook: `steven/train_patchtst_hf_channel_attention.ipynb`.
+
+| Setting | OHLC RMSE ($) | Dir Acc (bar 1/2/3) | Coherence | Best epoch |
+|---|---|---|---|---|
+| baseline (7/7), False | 3.1484 | 0.5240 / 0.5403 / 0.5524 | 0.9741 | 20 |
+| baseline (7/7), True | 3.2878 | 0.5344 / 0.5440 / 0.5519 | 0.9875 | 19 |
+| overlap winner (14/7), False | 3.0305 | 0.5232 / 0.5327 / 0.5465 | 0.9266 | 20 |
+| overlap winner (14/7), True | 3.0403 | 0.5215 / 0.5340 / 0.5453 | 0.9011 | 20 |
+| **(14/14), False (this retrain)** | 3.0505 | 0.5273 / 0.5419 / 0.5457 | 0.9370 | 20 |
+| **(14/14), True (this retrain)** | 3.0781 | 0.5190 / 0.5382 / 0.5469 | 0.9462 | 20 |
+
+**Conclusion: retrain reproduced the lost-run's numbers exactly** (RMSE 3.0505/3.0781, dir
+acc and coherence all matching to 4 decimal places -- same seed, same code, as expected),
+confirming the checkpoint is trustworthy and the earlier disconnect didn't corrupt
+anything. Confirms the sweep's finding: `(14,14)` gets nearly all of `(14,7)`'s RMSE
+improvement over baseline, with directional accuracy on par with both reference points and
+coherence clearly better than `(14,7)`'s (0.937/0.946 vs 0.927/0.901) -- i.e., patch length
+14 does the work; the 50% overlap in `(14,7)` wasn't necessary to get most of the benefit,
+and this simpler 5-patch (vs. 9-patch), no-overlap config keeps more of the coherence the
+original `(7,7)` baseline had.
+
+**Not yet backtested** -- checkpoint just pushed, backtest wired into `colab_train.ipynb`
+but not yet run. Given `(14,7)`'s backtest outperformed even its own (larger) forecasting
+regression, and `(14,14)`'s forecasting regression is smaller still, this is a promising
+candidate to beat or match `(14,7)`'s +9.68%/+12.81% total return -- to be confirmed.
+
+**Caveats**: one seed per setting; the wider sweep's other 3 configs (`(10,10)`, `(10,5)`,
+`(21,7)`) were not retrained/pushed since they collapsed to below-chance directional
+accuracy in the lost run -- not worth the Colab time to reproduce for confirmation only,
+though their exact numbers are only preserved in this conversation's history, not in a
+pushed comparison_metrics file.
