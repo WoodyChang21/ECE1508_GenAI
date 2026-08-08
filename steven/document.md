@@ -43,3 +43,57 @@ Backtesting the two `14`-length candidates surfaced an asymmetry: `(14,14)` is t
 - All results are single-seed; not yet confirmed against seed noise.
 - Patch geometry interacts with `channel_attention` non-additively — there is no one setting that's best for both; `False` was picked here as it has the stronger, single best result.
 - Backtest window is a bullish stretch for SPY, so the ~+24% buy-and-hold benchmark is a high bar the model doesn't clear despite being genuinely profitable and selective (67-73% win rate).
+
+## Appendix: full numerical results
+
+All rows are `hf_patchtst_revin_no_volume` family (RevIN, raw OHLC target, no volume), 20 epochs / `lr=6e-4` unless noted otherwise. `**` marks the best model.
+
+### Forecasting metrics
+
+| Experiment | `channel_attention` | OHLC RMSE | Dir Acc (bar 1/2/3) | Coherence |
+|---|---|---|---|---|
+| Baseline, patch (7,7) | False | 3.1484 | 0.5240 / 0.5403 / 0.5524 | 0.9741 |
+| Baseline, patch (7,7) | True | 3.2878 | 0.5344 / 0.5440 / 0.5519 | 0.9875 |
+| LR schedule (cosine) | False | 3.0547 | 0.5006 / 0.5252 / 0.5219 | 0.9107 |
+| LR schedule (cosine) | True | 3.0033 | 0.4948 / 0.5027 / 0.5048 | 0.8882 |
+| More epochs / early stop (up to 100ep) | False | 3.1318 | 0.4789 / 0.4806 / 0.4618 | 0.9091 |
+| More epochs / early stop (up to 100ep) | True | 3.0599 | 0.4723 / 0.4810 / 0.4856 | 0.8903 |
+| Directional loss, w=0.1 | False | 3.1253 | 0.5236 / 0.5382 / 0.5499 | 0.9412 |
+| Directional loss, w=0.1 | True | 3.4010 | 0.5265 / 0.5419 / 0.5524 | 0.9808 |
+| Directional loss, w=0.5 | False | 3.1253 | 0.5065 / 0.5219 / 0.5273 | 0.7939 |
+| Directional loss, w=0.5 | True | 3.2380 | 0.5198 / 0.5382 / 0.5490 | 0.9712 |
+| Directional loss, w=1.0 | False | 3.1285 | 0.5140 / 0.5186 / 0.5365 | 0.8798 |
+| Directional loss, w=1.0 | True | 3.0628 | 0.5173 / 0.5223 / 0.5336 | 0.7972 |
+| Directional loss, w=3.0 | False | 3.1027 | 0.4827 / 0.4764 / 0.4902 | 0.7764 |
+| Directional loss, w=3.0 | True | 3.7407 | 0.5035 / 0.4827 / 0.4856 | 0.9145 |
+| Close-weighted loss (4x) | False | 3.2136 | 0.5227 / 0.5411 / 0.5515 | 0.9554 |
+| Close-weighted loss (4x) | True | 3.4157 | 0.5252 / 0.5386 / 0.5448 | 0.9666 |
+| Patch (10,10) | False | 3.2106 | 0.4940 / 0.4965 / 0.5048 | 0.9746 |
+| Patch (10,10) | True | 3.2770 | 0.4864 / 0.4919 / 0.4948 | 0.9504 |
+| Patch (10,5) | False | 3.2360 | 0.4931 / 0.4940 / 0.4965 | 0.9720 |
+| Patch (10,5) | True | 3.3282 | 0.4739 / 0.4760 / 0.4760 | 0.9591 |
+| Patch (21,7) | False | 3.1642 | 0.4931 / 0.4994 / 0.4923 | 0.9483 |
+| Patch (21,7) | True | 3.1766 | 0.4848 / 0.4823 / 0.4710 | 0.9504 |
+| Patch (14,7) overlap | False | 3.0305 | 0.5232 / 0.5327 / 0.5465 | 0.9266 |
+| Patch (14,7) overlap | True | 3.0403 | 0.5215 / 0.5340 / 0.5453 | 0.9011 |
+| **Patch (14,14)** | **False** | **3.0505** | **0.5273 / 0.5419 / 0.5457** | **0.9370** |
+| Patch (14,14) | True | 3.0781 | 0.5190 / 0.5382 / 0.5469 | 0.9462 |
+
+### Backtest results
+
+SPY hourly, walk-forward, test window 2024-01 to 2025-05. Benchmarks over the same window: buy-and-hold total +24.11% / annual +17.09%; naive periodic total -5.98% / annual -4.41%.
+
+| Experiment | `channel_attention` | Trades | Win rate | Take-profit rate | Total return | Annual return |
+|---|---|---|---|---|---|---|
+| Baseline, patch (7,7) | False | 868 | 69.12% | 57.60% | +9.62% | +6.95% |
+| Baseline, patch (7,7) | True | 535 | 66.36% | 55.14% | +8.06% | +5.87% |
+| LR schedule (cosine) | False | 250 | 75.20% | 73.60% | -9.52% | -7.14% |
+| LR schedule (cosine) | True | 274 | 75.91% | 75.18% | +6.45% | +4.73% |
+| Patch (14,7) overlap | False | 584 | 75.68% | 71.40% | +9.68% | +6.99% |
+| Patch (14,7) overlap | True | 527 | 75.14% | 72.30% | +12.81% | +9.23% |
+| **Patch (14,14)** | **False** | **626** | **72.68%** | **67.25%** | **+14.47%** | **+10.39%** |
+| Patch (14,14) | True | 705 | 70.07% | 61.56% | -0.18% | -0.13% |
+| Close-weighted loss (4x) | False | 508 | 68.11% | 56.69% | -1.91% | -1.41% |
+| Close-weighted loss (4x) | True | 558 | 66.49% | 52.15% | +1.28% | +0.94% |
+
+Directional-loss and early-stopping variants were not backtested (both had below-chance forecasting-metric directional accuracy on at least some bars, ruling them out before a backtest was warranted).
