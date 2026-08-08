@@ -104,6 +104,19 @@ than staring at the aggregate KL number. Not fully validated as "collapse solved
 (not the spread seen here), that's the point to escalate to the architectural lever from the root-cause
 paragraph above.
 
+**A separate, independently-discovered problem turned out to be tangled up with this one**: `log_volume_norm`
+is z-scored to unit variance while the raw price log-return components (including `body_ret`, the component
+that determines candle direction) are not, so volume was dominating the reconstruction loss by ~1800:1 --
+`body_ret` was getting almost no gradient signal regardless of the KL/`z_dim` story above. See
+`cvae_direction_collapse.md` for the full investigation, the fix (an explicit `price_scale` division added
+to `weighted_mse_loss`/`cvae_loss` in `src/losses.py`), and a re-check against the retrained checkpoint:
+the fix produced a real, measurable improvement on one specific symptom (whether context explains more of
+`body_ret`'s variance than the model's own sampling noise, which flipped from *less* to *slightly more*),
+but CVAE's predicted scale for `body_ret` is still only ~6% of real market variability and shows no
+demonstrated correlation with a simple trend signal -- a genuine partial fix, not a resolved one. Worth
+trying next: dropping `w_vol` further (by another 2-3 orders of magnitude) to see whether that closes more
+of the gap, or whether this is a harder architectural ceiling tied to the VAE bottleneck itself.
+
 ## "Trade confidence" redesign (alias: **trade confidence**) -- implemented (2026-08-07)
 
 **Was contingent on the CVAE posterior-collapse fix above; proceeded once the walk-forward evidence (not

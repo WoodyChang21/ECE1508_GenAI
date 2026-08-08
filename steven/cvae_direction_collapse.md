@@ -166,6 +166,71 @@ raw-loss-reduction-per-capacity of the four price terms, per the variance table 
   fixable vs. a genuine ceiling — the root-cause section above makes a strong case this
   is worth trying before concluding direction is unlearnable.
 
+## Re-checked against the retrained checkpoint (post `price_scale` fix) — partial improvement, not a fix
+
+The "not yet done" item above (retrain with price/volume on comparable loss scales) happened —
+the retrain whose log shows `price_scale (open_ret, body_ret, upper_wick, lower_wick): [0.00268, ...]`
+being computed and passed into the loss is exactly this fix actually running, and
+`outputs/cvae_checkpoint.pt` now reflects it. Re-ran this file's own diagnostics (100 test windows,
+k=5, same methodology as above; script not committed, same precedent as the original) to check
+whether it worked:
+
+**Table 1 (across-window vs. within-window variation) — the headline number moved in the right
+direction**:
+
+| component | across-window std | within-window std | ratio | old ratio |
+|---|---|---|---|---|
+| `open_ret` | 0.00011 | 0.00012 | 0.92 | 2.7 |
+| `body_ret` | 0.00018 | 0.00017 | **1.08** | **0.56** |
+| `upper_wick` | 0.00010 | 0.00002 | 4.05 | 2.5 |
+| `lower_wick` | 0.00011 | 0.00003 | 4.05 | 2.5 |
+
+`body_ret`'s ratio flipped from 0.56 (context explains *less* variance than the model's own sampling
+noise — the literal signature of collapse) to 1.08 (context now explains *slightly more*). That's a
+real, qualitative change in the specific pathology this file opened with, not nothing.
+
+**But table 3 (scale vs. real data) shows the absolute magnitude barely moved**:
+
+| component | real train std | CVAE pred std | ratio | old ratio | PatchTST pred std | PatchTST ratio |
+|---|---|---|---|---|---|---|
+| `open_ret` | 0.00268 | 0.00011 | 0.041 | 0.049 | 0.00133 | 0.496 |
+| `body_ret` | 0.00289 | 0.00018 | 0.063 | 0.046 | 0.00121 | 0.417 |
+
+CVAE's `body_ret` spread is still only ~6% of real market variability (was ~4.6%) — better, but nowhere
+near closed. PatchTST, unaffected by any of this (no VAE bottleneck, not retrained), sits at ~42–50% of
+real variability for the same components — confirming again that CVAE's ceiling problem is real and
+specific to it, not just "direction is unlearnable from this context" in general.
+
+**Correlation with a real preceding-10-bar `body_ret` trend (a proxy for "does the model track
+momentum," not the same measurement construction as the original `r=-0.004`, so not directly
+comparable — but answering the same question)**: CVAE prior (mean-over-k) `r=-0.027`; the recognition
+network's best-case ceiling (decoding `mu_q`, which sees the real horizon) `r=-0.021`; **PatchTST itself
+`r=-0.137`** — also indistinguishable from zero at this sample size (N=100, so |r| needs to clear
+roughly 0.20 to be a confident nonzero effect). Since even PatchTST — fully deterministic, unaffected by
+any VAE-specific pathology — shows no usable correlation with this particular simple trend proxy either,
+this particular test doesn't cleanly separate "CVAE-specific defect" from "this simple trend signal
+isn't real for either model at this context length." Don't read the recognition network's `r=-0.021` as
+a regression from the original's `r=0.12` — both are within one standard error of zero at these sample
+sizes (N=40 originally, N=100 here), i.e. statistically indistinguishable from each other and from "no
+signal."
+
+**Net read**: the fix produced a genuine, measurable improvement on the exact symptom that motivated it
+(the across/within-window variance ratio for `body_ret`, the clearest single-number signature of
+collapse, flipped from <1 to slightly >1) — this isn't nothing, and it's a cleaner, more direct
+"did the fix do anything" signal than the consensus-fraction evidence in the posterior-collapse section
+above (which turned out to be uninformative noise once A/B tested). But the absolute scale of captured
+variation is still small (~6% of real), and there's still no demonstrated linear correlation with a
+simple trend signal. Read together with `backlog.md`'s posterior-collapse entry: **two independent
+interventions (KL-budget/annealing/dropout, and now loss-scale correction) have each moved one
+diagnostic number in the right direction without producing a demonstrably *useful* CVAE direction
+signal yet.** The most direct next check, per the original open question 2 in this file: is `body_ret`
+fundamentally this hard from a 70-bar context regardless of architecture (plausible, given PatchTST's
+own weak trend-correlation here), or is there still a fixable CVAE-specific bottleneck on top of a hard
+problem both models share? The scale comparison (CVAE still at ~15% of PatchTST's own predicted std for
+`body_ret`, despite an identical `w_price`/`w_vol` loss weighting now) argues there's still a
+CVAE-specific gap beyond whatever the shared difficulty is — the VAE information bottleneck
+(`z_dim=8` + KL free-bits) is still squeezing genuinely harder than PatchTST's architecture does.
+
 ## To-do
 
 - [ ] **Change the walk-forward advance rule: always skip 3 candles (HORIZON), whether a
@@ -178,3 +243,8 @@ raw-loss-reduction-per-capacity of the four price terms, per the variance table 
   point 3 in `v1.md`), and what it changes about the backtest (far fewer decision points
   overall, changes `n_decisions` denominators in `outcome_breakdown`, and changes what
   "consecutive" windows look like for any future diagnostic that walks decisions in order).
+- [ ] **Try dropping `w_vol` by ~2-3 orders of magnitude (or z-score price components for the
+  loss too) instead of the current `price_scale` division**, and see if closing the *remaining*
+  gap to PatchTST's predicted scale (CVAE is still at ~15% of PatchTST's own `body_ret` std) requires
+  a bigger loss-scale correction, a bigger `z_dim`, or is a harder architectural ceiling tied to the
+  VAE bottleneck itself.
