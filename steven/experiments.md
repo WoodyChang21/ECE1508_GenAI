@@ -550,3 +550,48 @@ still produced *higher* per-trade win rates).
 **Caveats**: one seed per setting; both settings' `best_val_epoch` landed at the final
 epoch (20/20, vs. baseline's 20/19) -- weak evidence training hadn't fully plateaued here
 either, though nowhere near as pronounced as step 4's original curve; no backtest run yet.
+
+## hf_patchtst_revin_no_volume_overlap walk-forward backtest
+
+**What**: Walk-forward backtest against the overlapping-patches checkpoints logged above.
+Same methodology as every other backtest on this branch (`steven/src/evaluate_revin.py`,
+coherence-only confidence gate, `min_return_threshold=0.001`, resume-on-resolution).
+
+| Setting | Trades | Win rate | Take-profit rate | Total return | Annual return |
+|---|---|---|---|---|---|
+| step 4 baseline, False | 868 | 69.12% | 57.60% | +9.62% | +6.95% |
+| overlap, False | 584 | **75.68%** | **71.40%** | +9.68% | +6.99% |
+| step 4 baseline, True | 535 | 66.36% | 55.14% | +8.06% | +5.87% |
+| overlap, True | 527 | **75.14%** | **72.30%** | **+12.81%** | **+9.23%** |
+
+**Conclusion: the best backtest result on this branch, and the first case where a
+forecasting-metric regression translated into a backtest *improvement*, not a cost.** The
+overlap checkpoints' forecasting metrics were mixed (RMSE improved, dir acc/coherence
+dropped modestly vs. baseline -- see the entry above), but the backtest tells an
+unambiguously positive story. `False` lands at essentially the same total return as
+baseline (+9.68% vs +9.62%) while trading far more selectively and at much higher quality
+(75.68% win rate on 584 trades vs 69.12% on 868). `True` is a clean, outright win: +12.81%
+total return / +9.23% annualized -- the best result logged on this branch by a wide margin
+(previous best: +9.62%/+6.95%) -- with win rate jumping from 66.36% to 75.14% and
+take-profit rate from 55.14% to 72.30%, on almost the same trade count (527 vs 535), so
+this isn't "fewer but better" (like the lrschedule backtest above) -- it's genuinely better
+trades at essentially unchanged volume. Confidence calibration improved too: coherent-up
+win rate rose from 73.2-73.4% (baseline) to **79.8-80.0%** (overlap), with direction
+accuracy within that bucket also a touch higher (0.568-0.572 vs 0.556-0.563).
+
+**This directly reinforces (from the opposite direction this time) the branch's standing
+caveat that forecasting metrics don't reliably predict backtest quality.** Every other
+lever that improved RMSE (LR schedule, early stopping) did so by degrading directional
+accuracy/coherence enough to also hurt or gut the backtest. Overlapping patches improved
+RMSE with a much smaller, more contained forecasting-metric cost -- and that smaller cost
+turned out not to cost anything in the backtest at all; if anything the model became a
+*better*, more selective trader despite slightly noisier raw predictions.
+
+**Implication**: `hf_patchtst_revin_no_volume_overlap` (`channel_attention=True`
+especially) is now the strongest candidate on this branch, ahead of the original step 4
+checkpoints. Worth considering as the new default going forward, pending the seed-noise
+question (deferred for now per current plan) and step 5 (close-weighted loss).
+
+**Caveats**: same test window/methodology as every other backtest on this branch
+(2024-01 to 2025-05, bullish for SPY); one seed per setting, not yet confirmed against seed
+noise (multi-seed confirmation currently deferred).
