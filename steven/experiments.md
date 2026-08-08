@@ -404,3 +404,78 @@ regime), which is the next experiment queued.
 a shallower decay floor might recover some of the coherence loss while keeping part of the
 RMSE gain, untested; no backtest run (directional accuracy dropped, in one case below
 chance, so not worth backtesting over the existing step 4 checkpoints).
+
+## hf_patchtst_revin_no_volume_earlystop (step 4 + early stopping, MAX_EPOCHS=100)
+
+**What**: The queued "give it more time, don't push harder" follow-up to the LR-schedule
+result -- adds early stopping (patience=8 epochs on val loss) and raises `MAX_EPOCHS` from
+20 to 100, flat `LR=6e-4` unchanged (no schedule), otherwise identical to step 4
+(architecture/data/loss). `evaluate()` now reloads the best-val-loss checkpoint before
+computing metrics (a real fix over every other notebook in this family, which evaluated
+whatever weights were left in memory at loop-end -- usually harmless when best epoch is the
+last or second-to-last, but would have been actively misleading here with an 8-epoch
+patience gap). Notebook: `steven/train_patchtst_hf_channel_attention.ipynb`.
+
+| Setting | OHLC RMSE ($) | Dir Acc (bar 1/2/3) | Coherence | Best val loss | Best/stopped epoch |
+|---|---|---|---|---|---|
+| baseline (20ep, flat LR), False | 3.1484 | 0.5240 / 0.5403 / 0.5524 | 0.9741 | 0.1331 | 20/20 |
+| baseline (20ep, flat LR), True | 3.2878 | 0.5344 / 0.5440 / 0.5519 | 0.9875 | 0.1316 | 19/20 |
+| cosine LR (20ep), False | 3.0547 | 0.5006 / 0.5252 / 0.5219 | 0.9107 | 0.1756 | -- |
+| cosine LR (20ep), True | 3.0033 | 0.4948 / 0.5027 / 0.5048 | 0.8882 | 0.1731 | -- |
+| earlystop (up to 100ep), False | 3.1318 | **0.4789 / 0.4806 / 0.4618** | 0.9091 | **0.000076** | 100/100 |
+| earlystop (up to 100ep), True | 3.0599 | **0.4723 / 0.4810 / 0.4856** | 0.8903 | **0.000065** | 100/100 |
+
+**Conclusion: early stopping never actually fired -- val loss kept "improving" all the way
+to the epoch-100 ceiling -- and the result is the worst directional accuracy on this entire
+branch, below chance on every single bar for both settings.** `best_val_epoch ==
+stopped_epoch == 100` for both settings: patience (8 epochs without improvement) was never
+triggered, because val loss kept ticking down, however slightly, essentially every epoch.
+But look at the scale of that "improvement": best val loss fell from ~0.13 (baseline, 20
+epochs) to **0.000076/0.000065** -- roughly **1,700-2,000x smaller**. RMSE on the held-out
+test set barely moved in that time (3.15 -> 3.13, 3.29 -> 3.06, similar ballpark to the
+LR-schedule run's 3.05/3.00). That combination -- a near-total collapse in the training
+loss with almost no change in real-price point error -- is the signature of the model
+converging toward a near-constant, close-to-persistence prediction in RevIN-normalized
+space: something that costs almost nothing in squared error once the context window's own
+mean/std already center it, but that has stopped encoding any real directional information
+at all. Directional accuracy confirms this exactly: 0.462-0.481 (`False`) and 0.472-0.486
+(`True`) -- below chance on every bar, worse than the LR-schedule run's regression, worse
+than every volume-included step-3 collapse case, the worst directional result on this
+branch. Coherence stays fairly high (0.909/0.890, close to the LR-schedule run's
+0.911/0.888) -- the model is still picking one consistent direction per window, it's just
+now wrong more often than not: a textbook "confidently wrong" collapse, at a larger scale
+than anything seen before on this branch.
+
+**This closes the loop the LR-schedule experiment opened, decisively.** That run showed
+that reaching a *lower* loss *faster* (via decay) cost directional accuracy/coherence. This
+run shows that reaching a much *lower* loss by *any* means -- more raw epochs, no schedule,
+no directional loss, nothing but time -- costs even more, worse than the schedule did. The
+two results together rule out "it's specifically the schedule's fault" and confirm the
+harder hypothesis: **on this architecture/data, further optimizing plain RevIN MSE keeps
+trading real directional signal for immaterial reductions in point error, monotonically,
+the longer/harder training runs.** This is the training-pipeline review's "MSE-optimal
+forecast on a near-random-walk series looks like persistence" theory demonstrated about as
+starkly as it can be. Extending training time or convergence precision is not a viable lever
+on this loss objective -- the fix, if there is one, has to change what the loss actually
+rewards (which directional loss already tried and failed at, twice), or stop training
+noticeably earlier than either of these two "let it converge more" attempts did.
+
+**Practical implication for `EARLY_STOP_PATIENCE`**: patience=8 was too loose to catch this
+-- it only stops on a genuine plateau, and this collapse never plateaus, it just keeps
+inching down. A meaningfully tighter, more useful stopping rule for this objective would
+need to watch a **trading-relevant metric** (directional accuracy or coherence on a held-out
+window) rather than val loss itself, since val loss and directional quality are anti-
+correlated here, not aligned -- val loss is actively the wrong thing to early-stop on for
+this model.
+
+**Implication for the branch**: step 4's original 20-epoch, flat-LR checkpoints remain the
+best and correct ones to backtest -- every attempt to train them further or faster (loss
+engineering, LR schedule, more epochs) has now made directional accuracy and/or coherence
+worse, never better. This is not "step 4 was undertrained"; the 20-epoch cutoff, in
+hindsight, looks closer to an accidental sweet spot than a shortfall.
+
+**Caveats**: one seed per setting; no backtest run (below-chance directional accuracy on
+every bar makes this not worth backtesting); `EARLY_STOP_PATIENCE=8` monitoring val loss is
+now shown to be the wrong stopping signal for this objective -- not retried with a
+directional/coherence-based stopping rule, since the loss-engineering angle (directional
+loss) is already independently ruled out.
