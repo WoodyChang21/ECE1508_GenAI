@@ -1,0 +1,47 @@
+seed: 42
+device: auto  # auto | cpu | mps | cuda
+data_path: steven/data/spy_ohlcv_1h.parquet
+
+# Same architecture/loss/train recipe as configs/cvae.yaml, unchanged -- only the input
+# features change (EMA9/EMA21+RSI14+VIX added, see src/momentum_pipeline.py), same
+# single-variable-test discipline as every other momentum experiment in
+# cvae_direction_collapse.md. This is a SEPARATE file from configs/cvae.yaml (rather than
+# adding momentum_features to it directly) so "configs/cvae.yaml" keeps meaning what every
+# prior doc reference to it already means -- a stable, unenriched recipe.
+momentum_features:
+  enabled: true
+  vix_data_path: steven/data/vix_daily_yfinance.parquet
+
+model:
+  hidden: 32
+  ctx_dim: 64
+  z_dim: 8
+  decoder_hidden: 128
+  ctx_dropout: 0.3
+  decoder_ctx_dim: 8
+
+loss:
+  w_price: 1.0
+  w_vol: 0.5
+  use_price_scale: true
+  kl_cycles: 3
+  kl_ramp_fraction: 0.5
+  free_bits: 0.15
+  w_direction: 1.0
+  direction_temperature: 0.003
+
+train:
+  max_epochs: 30
+  train_windows_per_epoch: 20000
+  windows_per_eval_set: 3000
+  batch_size: 512
+  lr: 0.0006
+  weight_decay: 0.0001
+  num_workers: 0
+  pin_memory: true
+
+inference:
+  num_samples: 5
+
+output:
+  checkpoint_path: steven/outputs/cvae_checkpoint.pt

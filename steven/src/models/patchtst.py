@@ -18,9 +18,11 @@ class PatchTST(nn.Module):
         num_layers: int = 3,
         dim_feedforward: int = 128,
         dropout: float = 0.1,
+        n_feature_channels: int = N_FEATURE_CHANNELS,
     ):
         super().__init__()
-        patch_dim = PATCH_LEN * N_FEATURE_CHANNELS  # 7 bars x 7 channels = 49
+        self.n_feature_channels = n_feature_channels
+        patch_dim = PATCH_LEN * n_feature_channels  # 7 bars x n_feature_channels
         self.patch_embed = nn.Linear(patch_dim, d_model)
         self.pos_embed = nn.Parameter(torch.zeros(1, N_PATCHES, d_model))
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
@@ -40,12 +42,18 @@ class PatchTST(nn.Module):
     def forward(
         self, context: torch.Tensor, patch_key_padding_mask: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """context: (B, 70, 7). patch_key_padding_mask: (B, 10) bool, True = ignore
-        (fully-padded patch). Returns (price_components (B,3,4), volume (B,3))."""
+        """context: (B, 70, n_feature_channels). patch_key_padding_mask: (B, 10) bool,
+        True = ignore (fully-padded patch). Returns (price_components (B,3,4), volume
+        (B,3))."""
         B = context.shape[0]
         assert context.shape[1] == MAX_CONTEXT, context.shape
 
-        patches = context.reshape(B, N_PATCHES, PATCH_LEN * N_FEATURE_CHANNELS)
+        # self.n_feature_channels, NOT the module-level N_FEATURE_CHANNELS import above --
+        # that's bound once at import time and would go stale if data_pipeline's own
+        # N_FEATURE_CHANNELS gets monkey-patched afterward (e.g. by momentum_pipeline.py's
+        # channel-layout patching), same staleness risk flagged for N_PATCHES/PATCH_LEN
+        # everywhere else this model is discussed.
+        patches = context.reshape(B, N_PATCHES, PATCH_LEN * self.n_feature_channels)
         x = self.patch_embed(patches) + self.pos_embed
         x = self.encoder(x, src_key_padding_mask=patch_key_padding_mask)
         x = x.reshape(B, -1)

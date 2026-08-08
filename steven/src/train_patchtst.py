@@ -21,6 +21,8 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import src.data_pipeline as dp
+import src.momentum_pipeline as mp
 from src.data_pipeline import WindowDataset, WindowSampler, build_dataset, extract_arrays
 from src.losses import weighted_mse_loss
 from src.models.patchtst import PatchTST
@@ -108,7 +110,18 @@ def main() -> None:
     # of this same config produce different starting weights, not just different-looking noise.
     torch.manual_seed(cfg["seed"])
 
-    df, bounds, stats = build_dataset(cfg["data_path"])
+    # Opt-in, same pattern as train_cvae.py -- configs/patchtst.yaml has no
+    # `momentum_features` key, so build_dataset's original 7-channel behavior is exactly
+    # preserved for every existing config.
+    momentum_cfg = cfg.get("momentum_features")
+    if momentum_cfg and momentum_cfg.get("enabled"):
+        df, bounds, stats, momentum_stats = mp.build_momentum_dataset(cfg["data_path"], momentum_cfg["vix_data_path"])
+        logger.info(
+            "momentum features enabled: ema_cross/trend_position/rsi/vix, N_FEATURE_CHANNELS=%d",
+            dp.N_FEATURE_CHANNELS,
+        )
+    else:
+        df, bounds, stats = build_dataset(cfg["data_path"])
     feat, opens, closes = extract_arrays(df)
 
     train_sampler = WindowSampler(*bounds["train"])
@@ -127,7 +140,7 @@ def main() -> None:
         val_ds, batch_size=cfg["train"]["batch_size"], shuffle=False, collate_fn=collate, **loader_kwargs
     )
 
-    model = PatchTST(**cfg["model"]).to(device)
+    model = PatchTST(**cfg["model"], n_feature_channels=dp.N_FEATURE_CHANNELS).to(device)
     optimizer = torch.optim.Adam(
         model.parameters(), lr=cfg["train"]["lr"], weight_decay=cfg["train"]["weight_decay"]
     )

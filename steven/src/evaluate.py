@@ -1,11 +1,15 @@
-"""Walk-forward backtest of PatchTST vs. CVAE over the SPY test period.
+"""Random-sample evaluation of PatchTST vs. CVAE over the SPY test period (no walk-forward,
+no confidence-threshold sweep -- see the module note above main() for why, and
+cvae_direction_collapse.md's "revisit the pre-walk-forward era" discussion for the full
+context of switching back to this style).
 
-Replays the test period once, in real chronological order, one decision at a time --
-the way an actual trading account would experience it -- rather than evaluating a large
-batch of independently-sampled windows (an earlier version of this script did both; the
-random-sample version was dropped as uninformative once the walk-forward backtest below
-existed: overlapping windows, no real equity curve, and no way to reuse for the
-sample-plot illustrations without a second, disconnected population).
+Draws N independently-sampled (start_idx, ctx_bars) windows from the test period (across all
+9 context lengths, see WindowSampler.draw) rather than replaying it sequentially. This is
+deliberately NOT a real equity curve -- windows can overlap in calendar time, so there's no
+single coherent account balance to compound, which is why no total_return/buy-and-hold
+comparison is reported here (see random_sample_stats). The walk-forward backtest this
+replaced (run_walk_forward/walk_forward_stats/make_plots below) stays in this file, unused by
+main() by default, in case a sequential/compounding evaluation is wanted again later.
 
 Usage:
     python steven/src/evaluate.py \\
@@ -31,9 +35,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import mplfinance as mpf
 
+import src.data_pipeline as dp
+import src.momentum_pipeline as momentum_pipeline
 from src.data_pipeline import (
+    CONTEXT_LENGTHS,
     HORIZON,
     MAX_CONTEXT,
+    WindowSampler,
     build_dataset,
     build_window,
     exit_price_from_components,
@@ -58,6 +66,12 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--patchtst-checkpoint", type=str, default="steven/outputs/patchtst_checkpoint.pt")
     p.add_argument("--cvae-checkpoint", type=str, default="steven/outputs/cvae_checkpoint.pt")
+    p.add_argument(
+        "--n-test-windows", type=int, default=100,
+        help="Number of independently-sampled (start_idx, ctx_bars) test windows to draw (spread "
+        "across all 9 context lengths -- see WindowSampler.draw), both models evaluated on the "
+        "identical drawn set. NOT a walk-forward replay -- see module docstring.",
+    )
     p.add_argument("--num-samples", type=int, default=5, help="K sampled draws per CVAE decision.")
     p.add_argument("--device", type=str, default="auto")
     p.add_argument("--metrics-out", type=str, default="steven/outputs/metrics.json")
@@ -547,6 +561,92 @@ def walk_forward_stats(df: pd.DataFrame, result: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Random-sample backtest -- the current default (see module docstring)
+# ---------------------------------------------------------------------------
+
+
+def run_random_sample_backtest(
+    predict_fn, feat: np.ndarray, opens: np.ndarray, closes: np.ndarray,
+    test_pairs: list[tuple[int, int]], min_return_threshold: float, stop_loss_pct: float,
+) -> dict:
+    """Same per-decision logic as run_walk_forward (classify_walk_forward_decision +
+    bracket_exit -- eligibility check, return-threshold filter, take-profit/stop-loss
+    bracket exit against the 3 REAL horizon bars, stop-loss winning same-bar ties), but over
+    a GIVEN list of independently-sampled (start_idx, ctx_bars) pairs instead of a
+    sequential walk -- no advance-rule bookkeeping, no equity compounding (see module
+    docstring for why: these windows can overlap in calendar time, so there's no single
+    coherent account balance). `test_pairs` is shared verbatim across both models' calls
+    (see main()), so PatchTST and CVAE are always evaluated on the identical windows,
+    unlike run_walk_forward where a trade/no-trade call can put each model on a different
+    real-time path."""
+    decisions = []
+    for start_idx, ctx_bars in test_pairs:
+        w = build_window(feat, opens, closes, start_idx, ctx_bars)
+        close_0 = w["close_0"]
+        true_price = w["y"][:12].reshape(1, 3, 4)
+        true_ohlc = reconstruct_prices(true_price, np.array([close_0]))[0]
+
+        pred = predict_fn(w)
+        take_profit, passes_quality_gate, price = pred["take_profit"], pred["passes_quality_gate"], pred["price"]
+        predicted_return = take_profit / close_0 - 1.0
+        eligible = take_profit > close_0
+        meets_return_threshold = predicted_return >= min_return_threshold
+        stop_loss = close_0 * (1.0 - stop_loss_pct) if stop_loss_pct > 0 else -np.inf
+
+        sell_price_arr, hit_tp_arr, hit_sl_arr = bracket_exit(
+            true_ohlc[None], np.array([take_profit]), np.array([stop_loss])
+        )
+        sell_price, hit_tp, hit_sl = float(sell_price_arr[0]), bool(hit_tp_arr[0]), bool(hit_sl_arr[0])
+        trade_return = float(sell_price / close_0 - 1.0)
+        label, would_trade = classify_walk_forward_decision(
+            eligible, meets_return_threshold, passes_quality_gate, hit_tp, hit_sl, trade_return
+        )
+
+        decisions.append({
+            "start_idx": start_idx,
+            "ctx_bars": ctx_bars,
+            "close_0": float(close_0),
+            "take_profit": float(take_profit),
+            "passes_quality_gate": bool(passes_quality_gate),
+            "price": price,
+            "true_ohlc": true_ohlc,
+            "label": label,
+            "would_trade": would_trade,
+            "sell_price": sell_price,
+            "hit_take_profit": hit_tp,
+            "hit_stop_loss": hit_sl,
+            "trade_return": trade_return,
+        })
+    return {"decisions": decisions}
+
+
+def random_sample_stats(result: dict) -> dict:
+    """Reduces run_random_sample_backtest's decision log into reportable stats -- same
+    outcome_breakdown/win_rate/take_profit_rate/avg_return shape as walk_forward_stats,
+    deliberately WITHOUT total_return/annualized_return/buy-and-hold: these windows can
+    overlap in calendar time, so summing or compounding returns across them wouldn't be a
+    real, realizable account balance -- see module docstring."""
+    decisions = result["decisions"]
+    trades = [d for d in decisions if d["would_trade"]]
+    labels = np.array([d["label"] for d in decisions], dtype=object)
+    out = {
+        "n_decisions": len(decisions),
+        "n_trades": len(trades),
+        "outcome_breakdown": outcome_breakdown(labels),
+    }
+    if not trades:
+        out.update(win_rate=None, take_profit_rate=None, avg_return=None)
+        return out
+
+    rets = np.array([t["trade_return"] for t in trades])
+    hits = np.array([t["hit_take_profit"] for t in trades])
+    out["win_rate"] = float((rets > 0).mean())
+    out["take_profit_rate"] = float(hits.mean())
+    out["avg_return"] = float(rets.mean())
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Sample plots
 # ---------------------------------------------------------------------------
 
@@ -874,14 +974,149 @@ def make_plots(df: pd.DataFrame, pt_decisions: list[dict], cvae_decisions: list[
     logger.info("wrote %d sample records to %s", len(records), samples_path)
 
 
+def make_random_sample_plots(df: pd.DataFrame, pt_decisions: list[dict], cvae_decisions: list[dict], args) -> None:
+    """Random-sample equivalent of make_plots (see module docstring for why this replaced
+    the walk-forward version) -- selects one illustrative example per (context bucket,
+    outcome) combination from CVAE's own decision log: narrow/wide context buckets
+    (dp.context_bucket -- moderate is skipped, narrow/wide only, per request) x
+    {win_take_profit, win_expiry, loss (lose_expiry or lose_stop_loss, whichever this
+    category has an example of)}, 6 total.
+
+    Unlike make_plots, PatchTST and CVAE are GUARANTEED to have a decision at the exact
+    same (start_idx, ctx_bars) here -- both were evaluated against the identical
+    `test_pairs` list (see main()), not two independently-advancing walks that can diverge
+    -- so there's no "not evaluated this window" fallback to handle."""
+    out_dir = Path(args.plots_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for stale in out_dir.glob("*_start*_ctx*.png"):
+        stale.unlink()
+    (out_dir / "samples.json").unlink(missing_ok=True)
+
+    rng = np.random.default_rng()
+    ohlc_cols = ["open", "high", "low", "close"]
+    pt_by_key = {(d["start_idx"], d["ctx_bars"]): d for d in pt_decisions}
+
+    loss_labels = {"lose_expiry", "lose_stop_loss"}
+    outcome_groups = {
+        "win_take_profit": lambda label: label == "win_take_profit",
+        "win_expiry": lambda label: label == "win_expiry",
+        "loss": lambda label: label in loss_labels,
+    }
+
+    records = []
+    plotted = 0
+    for bucket in ("narrow", "wide"):
+        for outcome_name, matches in outcome_groups.items():
+            candidates = [
+                d for d in cvae_decisions
+                if dp.context_bucket(d["ctx_bars"]) == bucket and matches(d["label"])
+            ]
+            if not candidates:
+                logger.warning("no CVAE decisions found for bucket=%s outcome=%s -- skipping", bucket, outcome_name)
+                continue
+            cvae_d = candidates[int(rng.integers(len(candidates)))]
+            pt_d = pt_by_key[(cvae_d["start_idx"], cvae_d["ctx_bars"])]
+
+            start_idx, ctx_bars = cvae_d["start_idx"], cvae_d["ctx_bars"]
+            buy_price = cvae_d["close_0"]
+            cvae_tp = cvae_d["take_profit"]
+            cvae_ohlc = reconstruct_prices(cvae_d["price"], buy_price)  # (3,4)
+
+            ctx_tail = min(ctx_bars, 20)
+            hz_start = start_idx + ctx_bars
+            plot_rows = df.iloc[hz_start - ctx_tail : hz_start + 3]
+            true_df = plot_rows.set_index("datetime")[["open", "high", "low", "close", "volume"]]
+
+            cvae_df = true_df.copy()
+            cvae_df.loc[cvae_df.index[-3:], ohlc_cols] = cvae_ohlc
+
+            true_horizon_ohlc = true_df.iloc[-HORIZON:][["open", "high", "low", "close"]].to_numpy()
+
+            # Shared 2% stop-loss for both models -- see module note above run_walk_forward.
+            stop_loss = buy_price * (1.0 - args.stop_loss_pct) if args.stop_loss_pct > 0 else None
+
+            cvae_sell_targets = [("CVAE TP", cvae_tp, "tab:green", "-")]
+            if stop_loss is not None:
+                cvae_sell_targets.append(("CVAE SL", stop_loss, "tab:red", "--"))
+
+            pt_tp = pt_d["take_profit"]
+            pt_ohlc = reconstruct_prices(pt_d["price"], buy_price)  # (3,4)
+            pt_df = true_df.copy()
+            pt_df.loc[pt_df.index[-3:], ohlc_cols] = pt_ohlc
+            pt_sell_targets = [("PatchTST TP", pt_tp, "tab:orange", "-")]
+            if stop_loss is not None:
+                pt_sell_targets.append(("PatchTST SL", stop_loss, "tab:red", ":"))
+
+            ground_truth_targets = [("PatchTST TP", pt_tp, "tab:orange", "-"), ("CVAE TP", cvae_tp, "tab:green", "-")]
+            if stop_loss is not None:
+                ground_truth_targets.append(("Stop-loss (shared)", stop_loss, "tab:red", "--"))
+
+            fig = plt.figure(figsize=(16, 8))
+            outer = fig.add_gridspec(6, 2, width_ratios=[1, 1], hspace=0.7, wspace=0.25)
+
+            render_panel(
+                fig, outer[0:4, 0], outer[4:6, 0], true_df, buy_price, "Ground truth",
+                sell_targets=ground_truth_targets,
+            )
+            render_panel(
+                fig, outer[0:2, 1], outer[2, 1], pt_df, buy_price, "PatchTST generated",
+                sell_targets=pt_sell_targets, sell_limit=pt_tp, would_enter=pt_d["would_trade"],
+                realized=(pt_d["sell_price"], trade_outcome_label(pt_d["hit_take_profit"], pt_d["hit_stop_loss"])),
+            )
+            render_panel(
+                fig, outer[3:5, 1], outer[5, 1], cvae_df, buy_price, "CVAE generated (draw nearest target)",
+                sell_targets=cvae_sell_targets, sell_limit=cvae_tp, would_enter=cvae_d["would_trade"],
+                realized=(cvae_d["sell_price"], trade_outcome_label(cvae_d["hit_take_profit"], cvae_d["hit_stop_loss"])),
+            )
+
+            fig.suptitle(f"CVAE outcome: {outcome_name}  |  bucket={bucket}, ctx_bars={ctx_bars}, start_idx={start_idx}")
+            out_path = out_dir / f"{outcome_name}_{bucket}_start{start_idx}_ctx{ctx_bars}.png"
+            fig.savefig(out_path, bbox_inches="tight")
+            plt.close(fig)
+            plotted += 1
+
+            def model_record(d, ohlc, tp):
+                outcome = trade_outcome_label(d["hit_take_profit"], d["hit_stop_loss"])
+                return {
+                    "candles": ohlc.tolist(),
+                    "spread": spread(ohlc),
+                    "sell_limit": tp,
+                    "would_enter": d["would_trade"],
+                    "outcome": outcome if d["would_trade"] else None,
+                    "realized_price": d["sell_price"] if d["would_trade"] else None,
+                    "realized_return_pct": (
+                        (d["sell_price"] / buy_price - 1.0) * 100 if d["would_trade"] else None
+                    ),
+                }
+
+            records.append({
+                "outcome": outcome_name,
+                "bucket": bucket,
+                "file": out_path.name,
+                "ctx_bars": ctx_bars,
+                "start_idx": start_idx,
+                "buy_price": buy_price,
+                "ground_truth": {"candles": true_horizon_ohlc.tolist(), "spread": spread(true_horizon_ohlc)},
+                "patchtst": model_record(pt_d, pt_ohlc, pt_tp),
+                "cvae": model_record(cvae_d, cvae_ohlc, cvae_tp),
+            })
+    logger.info("wrote %d sample plots to %s", plotted, out_dir)
+
+    samples_path = out_dir / "samples.json"
+    with open(samples_path, "w") as f:
+        json.dump(records, f, indent=2)
+    logger.info("wrote %d sample records to %s", len(records), samples_path)
+
+
 def main() -> None:
     args = parse_args()
     device = resolve_device(args.device)
     logger.info("device: %s", device)
 
     # CVAE.sample()'s reparameterize() draws from torch's global RNG (torch.randn_like) --
-    # without seeding it, CVAE's walk-forward numbers drift between runs on unchanged
-    # checkpoints.
+    # without seeding it, CVAE's numbers drift between runs on unchanged checkpoints. Also
+    # seeds the window draw below (np.random.default_rng(args.seed) is separate, but keeping
+    # both tied to the same --seed value keeps a whole run reproducible from one flag).
     torch.manual_seed(args.seed)
 
     pt_ckpt = torch.load(args.patchtst_checkpoint, map_location=device, weights_only=False)
@@ -891,7 +1126,18 @@ def main() -> None:
     cvae_cfg = cvae_ckpt["config"]
     assert pt_cfg["data_path"] == cvae_cfg["data_path"], "both checkpoints must share the same data_path"
 
-    df, bounds, stats = build_dataset(pt_cfg["data_path"])
+    # Momentum-aware build, mirroring train_cvae.py/train_patchtst.py's own opt-in toggle --
+    # both checkpoints' configs must agree (asserted above on data_path; same assumption
+    # extends to momentum_features since a mismatch would mean the two models were trained
+    # on different channel layouts, an evaluate.py can't reconcile).
+    momentum_cfg = cvae_cfg.get("momentum_features")
+    if momentum_cfg and momentum_cfg.get("enabled"):
+        df, bounds, stats, momentum_stats = momentum_pipeline.build_momentum_dataset(
+            cvae_cfg["data_path"], momentum_cfg["vix_data_path"]
+        )
+        logger.info("momentum features enabled: ema_cross/trend_position/rsi/vix, N_CHANNELS=%d", dp.N_CHANNELS)
+    else:
+        df, bounds, stats = build_dataset(pt_cfg["data_path"])
     feat, opens, closes = extract_arrays(df)
 
     sell_bound = train_exit_return_bound(opens, closes, bounds["train"], percentile=args.sell_bound_percentile)
@@ -900,49 +1146,48 @@ def main() -> None:
         args.sell_bound_percentile, sell_bound,
     )
 
-    patchtst = PatchTST(**pt_cfg["model"]).to(device)
+    patchtst = PatchTST(**pt_cfg["model"], n_feature_channels=dp.N_FEATURE_CHANNELS).to(device)
     patchtst.load_state_dict(pt_ckpt["model_state"])
     patchtst.eval()
 
-    cvae = CVAEInpainting(**cvae_cfg["model"]).to(device)
+    cvae = CVAEInpainting(**cvae_cfg["model"], in_channels=dp.N_CHANNELS).to(device)
     cvae.load_state_dict(cvae_ckpt["model_state"])
     cvae.eval()
 
-    test_lo, test_hi = bounds["test"]
-    wf_entry_idx = test_lo + WALK_FORWARD_CTX_BARS - 1  # first decision point's close_0 bar
+    test_sampler = WindowSampler(*bounds["test"])
+    rng = np.random.default_rng(args.seed)
+    test_pairs = test_sampler.draw(args.n_test_windows, rng)
 
     logger.info(
-        "running walk-forward backtest (ctx=%d bars, patchtst_min_return>=%.3f%%, "
+        "evaluating on %d randomly-sampled test windows (spread across %d context lengths, "
+        "no walk-forward, no confidence sweep -- patchtst_min_return>=%.3f%%, "
         "cvae_min_return>=%.3f%% [no CVAE quality gate -- see backlog.md], stop_loss=%.2f%% "
-        "[shared, see backlog.md], %d..%d)...",
-        WALK_FORWARD_CTX_BARS, args.patchtst_min_return_threshold * 100,
-        args.cvae_min_return_threshold * 100, args.stop_loss_pct * 100, test_lo, test_hi,
+        "[shared, whichever hits first, stop-loss wins same-bar ties -- see bracket_exit])...",
+        len(test_pairs), len(CONTEXT_LENGTHS), args.patchtst_min_return_threshold * 100,
+        args.cvae_min_return_threshold * 100, args.stop_loss_pct * 100,
     )
     pt_predict = make_patchtst_predict_fn(patchtst, device, sell_bound)
     cvae_predict = make_cvae_predict_fn(cvae, device, sell_bound, args.num_samples, args.cvae_sell_quantile)
-    pt_wf = run_walk_forward(
-        pt_predict, feat, opens, closes, test_lo, test_hi,
-        args.patchtst_min_return_threshold, args.stop_loss_pct,
+    pt_result = run_random_sample_backtest(
+        pt_predict, feat, opens, closes, test_pairs, args.patchtst_min_return_threshold, args.stop_loss_pct,
     )
-    cvae_wf = run_walk_forward(
-        cvae_predict, feat, opens, closes, test_lo, test_hi,
-        args.cvae_min_return_threshold, args.stop_loss_pct,
+    cvae_result = run_random_sample_backtest(
+        cvae_predict, feat, opens, closes, test_pairs, args.cvae_min_return_threshold, args.stop_loss_pct,
     )
     logger.info(
-        "walk-forward: PatchTST %d trades / %d decisions, CVAE %d trades / %d decisions",
-        len(pt_wf["trades"]), len(pt_wf["decisions"]), len(cvae_wf["trades"]), len(cvae_wf["decisions"]),
+        "random-sample: PatchTST %d trades / %d decisions, CVAE %d trades / %d decisions",
+        random_sample_stats(pt_result)["n_trades"], len(pt_result["decisions"]),
+        random_sample_stats(cvae_result)["n_trades"], len(cvae_result["decisions"]),
     )
 
     results = {
-        "walk_forward": {
-            "ctx_bars": WALK_FORWARD_CTX_BARS,
+        "random_sample": {
+            "n_test_windows": len(test_pairs),
             "patchtst_min_return_threshold": args.patchtst_min_return_threshold,
             "cvae_min_return_threshold": args.cvae_min_return_threshold,
             "stop_loss_pct": args.stop_loss_pct,
-            "buy_and_hold": buy_and_hold_benchmark(df, wf_entry_idx, test_hi - 1),
-            "naive_periodic": naive_periodic_benchmark(df, closes, wf_entry_idx, test_hi),
-            "patchtst": walk_forward_stats(df, pt_wf),
-            "cvae": walk_forward_stats(df, cvae_wf),
+            "patchtst": random_sample_stats(pt_result),
+            "cvae": random_sample_stats(cvae_result),
         }
     }
 
@@ -950,9 +1195,9 @@ def main() -> None:
     with open(args.metrics_out, "w") as f:
         json.dump(results, f, indent=2)
     logger.info("wrote metrics to %s", args.metrics_out)
-    logger.info("walk_forward: %s", json.dumps(results["walk_forward"], indent=2))
+    logger.info("random_sample: %s", json.dumps(results["random_sample"], indent=2))
 
-    make_plots(df, pt_wf["decisions"], cvae_wf["decisions"], args)
+    make_random_sample_plots(df, pt_result["decisions"], cvae_result["decisions"], args)
 
 
 if __name__ == "__main__":
