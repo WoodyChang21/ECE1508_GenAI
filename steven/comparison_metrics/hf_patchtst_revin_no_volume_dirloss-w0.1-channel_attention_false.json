@@ -1,0 +1,31 @@
+{
+  "experiment": {
+    "name": "hf_patchtst_revin_no_volume_dirloss",
+    "description": "hf_patchtst_revin_no_volume (step 4) + an explicit directional loss term, swept over DIR_LOSS_WEIGHT x channel_attention. Step 4 already has above-chance directional accuracy on its own (0.52-0.55) -- this tests whether the directional loss mechanism (previously only tried on step 3b, a below-chance volume-included variant) can push it higher when applied to a model that already has real signal.",
+    "target": "raw_price_revin_no_volume",
+    "include_volume": false,
+    "loss_weights": {
+      "note": "mse + dir_loss_weight * dir_loss, dir_loss_weight swept this run"
+    },
+    "dir_loss_weights_swept": [
+      0.1,
+      0.5,
+      1.0,
+      3.0
+    ],
+    "dir_loss_scale": 1.0,
+    "channel_attention": false,
+    "dir_loss_weight": 0.1,
+    "seed": 0
+  },
+  "best_val_loss": 0.23879371547698974,
+  "n_windows": 2397,
+  "ohlc_mae": 1.86557137966156,
+  "ohlc_rmse": 3.1253113746643066,
+  "directional_accuracy": [
+    0.5235711305798916,
+    0.5381727158948686,
+    0.5498539841468503
+  ],
+  "coherence_rate": 0.9411764705882353
+}
