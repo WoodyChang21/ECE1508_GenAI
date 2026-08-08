@@ -85,6 +85,11 @@ def parse_args() -> argparse.Namespace:
         "need to be exhaustive, just enough variety to find a clear example of each trend label.",
     )
     p.add_argument("--charts-dir", type=str, default="steven/outputs/scenario_charts")
+    p.add_argument(
+        "--n-examples", type=int, default=3,
+        help="Number of example windows to render per trend label (spread across that label's "
+        "candidate pool, not clustered near the median) -- e.g. 3 -> 9 charts total (3 labels).",
+    )
     return p.parse_args()
 
 
@@ -794,21 +799,26 @@ def render_scenario_panel(ax, sub_df: pd.DataFrame, title: str) -> None:
 def build_trend_comparison_chart(
     df: pd.DataFrame, feat: np.ndarray, opens: np.ndarray, closes: np.ndarray,
     patchtst, cvae, bounds: dict, device: torch.device, ctx_bars: int,
-    trend_lookback: int, step: int, out_dir: Path,
+    trend_lookback: int, step: int, out_dir: Path, n_examples: int = 3,
 ) -> None:
-    """One representative window per trend label (uptrend/downtrend/choppy -- the one
-    closest to that label's own median trend-z, for reproducibility), each rendered as its
+    """n_examples windows per trend label (uptrend/downtrend/choppy), each rendered as its
     own 3-panel image: ground truth spans the left column, PatchTST's single predicted
     path top right, one CVAE sampled draw bottom right -- the classic comparison layout
     from this file's original make_plots, minus every bit of trade-decision markup (no
     buy/sell lines, no ENTER/NO TRADE label, no text table). Purely visual: no metrics, no
-    trade decisions, no backtest."""
+    trade decisions, no backtest.
+
+    Examples within a label are spread evenly across that label's own candidate pool (by
+    position in chronological scan order, not by picking the n_examples closest to the
+    median trend-z) -- windows near each other in time tend to share the same label, so
+    picking by z-closeness alone would mostly return near-duplicate, overlapping windows
+    instead of genuinely different illustrations of the same scenario type."""
     body_ret_col = dp.FEATURE_COLS.index("body_ret")
     lo, hi = bounds["test"]
     pairs = RollingWindowSampler(lo, hi, ctx_bars, step=step).pairs()
 
     # Trend classification is cheap (pure feat-array slicing, no model calls) and run over
-    # every scanned window; inference is only run on the 3 windows actually picked below --
+    # every scanned window; inference is only run on the windows actually picked below --
     # to_patchtst_input is single-window only (slices axis 0 as time), so batching it over
     # every candidate window would be both wrong and wasteful.
     trend_z = np.array([
@@ -822,46 +832,51 @@ def build_trend_comparison_chart(
         if len(idx_pool) == 0:
             logger.warning("no windows classified as %s -- skipping", label)
             continue
-        median_z = np.median(trend_z[idx_pool])
-        i = idx_pool[np.argmin(np.abs(trend_z[idx_pool] - median_z))]
-        start_idx, this_ctx = pairs[i]
+        n = min(n_examples, len(idx_pool))
+        positions = np.unique(np.linspace(0, len(idx_pool) - 1, n).astype(int))
+        if len(positions) < n_examples:
+            logger.warning("only %d distinct %s windows available (wanted %d)", len(positions), label, n_examples)
+        picks = idx_pool[positions]
 
-        w = build_window(feat, opens, closes, start_idx, this_ctx)
-        masked_t = torch.from_numpy(w["masked_tensor"])[None].to(device)
-        with torch.no_grad():
-            pt_context, pt_patch_pad = to_patchtst_input(w["masked_tensor"])
-            pt_price_t, _ = patchtst(
-                torch.from_numpy(pt_context)[None].to(device), torch.from_numpy(pt_patch_pad)[None].to(device)
-            )
-            cvae_price_t, _ = cvae.sample(masked_t, k=1)  # (1,1,3,4)
-        pt_price = pt_price_t.cpu().numpy()[0]  # (3,4)
-        cvae_price = cvae_price_t.cpu().numpy()[0, 0]  # (3,4)
+        for example_num, i in enumerate(picks, start=1):
+            start_idx, this_ctx = pairs[i]
 
-        ctx_tail = min(this_ctx, 20)
-        hz_start = start_idx + this_ctx
-        plot_rows = df.iloc[hz_start - ctx_tail : hz_start + HORIZON]
-        true_df = plot_rows.set_index("datetime")[["open", "high", "low", "close", "volume"]]
-        close_0 = float(df.iloc[hz_start - 1]["close"])
+            w = build_window(feat, opens, closes, start_idx, this_ctx)
+            masked_t = torch.from_numpy(w["masked_tensor"])[None].to(device)
+            with torch.no_grad():
+                pt_context, pt_patch_pad = to_patchtst_input(w["masked_tensor"])
+                pt_price_t, _ = patchtst(
+                    torch.from_numpy(pt_context)[None].to(device), torch.from_numpy(pt_patch_pad)[None].to(device)
+                )
+                cvae_price_t, _ = cvae.sample(masked_t, k=1)  # (1,1,3,4)
+            pt_price = pt_price_t.cpu().numpy()[0]  # (3,4)
+            cvae_price = cvae_price_t.cpu().numpy()[0, 0]  # (3,4)
 
-        pt_ohlc = reconstruct_prices(pt_price, close_0)
-        pt_df = true_df.copy()
-        pt_df.loc[pt_df.index[-HORIZON:], ["open", "high", "low", "close"]] = pt_ohlc
+            ctx_tail = min(this_ctx, 20)
+            hz_start = start_idx + this_ctx
+            plot_rows = df.iloc[hz_start - ctx_tail : hz_start + HORIZON]
+            true_df = plot_rows.set_index("datetime")[["open", "high", "low", "close", "volume"]]
+            close_0 = float(df.iloc[hz_start - 1]["close"])
 
-        gen_ohlc = reconstruct_prices(cvae_price, close_0)
-        cvae_df = true_df.copy()
-        cvae_df.loc[cvae_df.index[-HORIZON:], ["open", "high", "low", "close"]] = gen_ohlc
+            pt_ohlc = reconstruct_prices(pt_price, close_0)
+            pt_df = true_df.copy()
+            pt_df.loc[pt_df.index[-HORIZON:], ["open", "high", "low", "close"]] = pt_ohlc
 
-        fig = plt.figure(figsize=(14, 7))
-        outer = fig.add_gridspec(2, 2, width_ratios=[1, 1], hspace=0.4, wspace=0.25)
-        render_scenario_panel(fig.add_subplot(outer[:, 0]), true_df, "Ground truth")
-        render_scenario_panel(fig.add_subplot(outer[0, 1]), pt_df, "PatchTST")
-        render_scenario_panel(fig.add_subplot(outer[1, 1]), cvae_df, "CVAE")
-        fig.suptitle(f"{label} (ctx_bars={ctx_bars}, start_idx={start_idx})")
+            gen_ohlc = reconstruct_prices(cvae_price, close_0)
+            cvae_df = true_df.copy()
+            cvae_df.loc[cvae_df.index[-HORIZON:], ["open", "high", "low", "close"]] = gen_ohlc
 
-        out_path = out_dir / f"{label}.png"
-        fig.savefig(out_path, bbox_inches="tight")
-        plt.close(fig)
-        logger.info("wrote %s scenario chart to %s", label, out_path)
+            fig = plt.figure(figsize=(14, 7))
+            outer = fig.add_gridspec(2, 2, width_ratios=[1, 1], hspace=0.4, wspace=0.25)
+            render_scenario_panel(fig.add_subplot(outer[:, 0]), true_df, "Ground truth")
+            render_scenario_panel(fig.add_subplot(outer[0, 1]), pt_df, "PatchTST")
+            render_scenario_panel(fig.add_subplot(outer[1, 1]), cvae_df, "CVAE")
+            fig.suptitle(f"{label} #{example_num} (ctx_bars={ctx_bars}, start_idx={start_idx})")
+
+            out_path = out_dir / f"{label}_{example_num}.png"
+            fig.savefig(out_path, bbox_inches="tight")
+            plt.close(fig)
+            logger.info("wrote %s example %d chart to %s", label, example_num, out_path)
 
 
 def make_plots(df: pd.DataFrame, pt_decisions: list[dict], cvae_decisions: list[dict], args) -> None:
@@ -1221,12 +1236,13 @@ def main() -> None:
     cvae.eval()
 
     logger.info(
-        "rendering trend scenario charts (ctx_bars=%d) -- purely visual, no metrics/backtest/trade decisions",
-        args.ctx_bars,
+        "rendering %d trend scenario charts per label (ctx_bars=%d) -- purely visual, "
+        "no metrics/backtest/trade decisions",
+        args.n_examples, args.ctx_bars,
     )
     build_trend_comparison_chart(
         df, feat, opens, closes, patchtst, cvae, bounds, device,
-        args.ctx_bars, args.trend_lookback, args.step, Path(args.charts_dir),
+        args.ctx_bars, args.trend_lookback, args.step, Path(args.charts_dir), args.n_examples,
     )
 
 
