@@ -20,8 +20,19 @@ def weighted_mse_loss(
     true_y: torch.Tensor,
     w_price: float = 1.0,
     w_vol: float = 0.5,
+    price_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
+    """price_scale: optional (4,) per-component [open_ret, body_ret, upper_wick,
+    lower_wick] training-set std, broadcast over price's last dim. `log_volume_norm` is
+    already z-scored to unit variance (see data_pipeline.apply_normalize) but the raw
+    price components are not, so without this, volume's ~1e5x larger raw variance
+    dominates price_loss regardless of w_price/w_vol -- see cvae_direction_collapse.md.
+    Default None reproduces the original unscaled behavior exactly (PatchTST's call
+    site never passes this)."""
     true_price, true_volume = unpack_y(true_y)
+    if price_scale is not None:
+        pred_price = pred_price / price_scale
+        true_price = true_price / price_scale
     price_loss = F.mse_loss(pred_price, true_price)
     vol_loss = F.mse_loss(pred_volume, true_volume)
     total = w_price * price_loss + w_vol * vol_loss
@@ -50,8 +61,9 @@ def cvae_loss(
     w_vol: float,
     beta: float,
     free_bits: float = 0.0,
+    price_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    recon_loss, parts = weighted_mse_loss(pred_price, pred_volume, true_y, w_price, w_vol)
+    recon_loss, parts = weighted_mse_loss(pred_price, pred_volume, true_y, w_price, w_vol, price_scale)
 
     kl = kl_diag_gaussians(mu_q, logvar_q, mu_p, logvar_p)
     kl = torch.clamp(kl, min=free_bits)  # free-bits floor: guards against posterior collapse

@@ -71,7 +71,7 @@ def collate(batch: list[dict]) -> dict:
     }
 
 
-def run_epoch(model, loader, optimizer, loss_cfg, beta, device, train: bool) -> dict:
+def run_epoch(model, loader, optimizer, loss_cfg, beta, price_scale, device, train: bool) -> dict:
     model.train(mode=train)
     totals = {"loss": 0.0, "price_loss": 0.0, "vol_loss": 0.0, "recon_loss": 0.0, "kl_loss": 0.0}
     n = 0
@@ -85,6 +85,7 @@ def run_epoch(model, loader, optimizer, loss_cfg, beta, device, train: bool) -> 
             loss, parts = cvae_loss(
                 price, volume, y, mu_q, logvar_q, mu_p, logvar_p,
                 loss_cfg["w_price"], loss_cfg["w_vol"], beta, loss_cfg["free_bits"],
+                price_scale=price_scale,
             )
 
         if train:
@@ -127,6 +128,18 @@ def main() -> None:
     df, bounds, stats = build_dataset(cfg["data_path"])
     feat, opens, closes = extract_arrays(df)
 
+    # CVAE-only fix for the volume-dominated loss (see cvae_direction_collapse.md):
+    # feat's first 4 columns are exactly [open_ret, body_ret, upper_wick, lower_wick]
+    # (FEATURE_COLS order), already raw log-returns -- unlike log_volume_norm, they're
+    # never z-scored, so their ~1e-6 variance is dwarfed by volume's unit variance in
+    # weighted_mse_loss unless rescaled here. train-set std only, same split discipline
+    # as fit_normalize.
+    train_lo, train_hi = bounds["train"]
+    price_scale = torch.tensor(
+        feat[train_lo:train_hi, :4].std(axis=0), dtype=torch.float32, device=device
+    )
+    logger.info("price_scale (open_ret, body_ret, upper_wick, lower_wick): %s", price_scale.tolist())
+
     train_sampler = WindowSampler(*bounds["train"])
     val_sampler = WindowSampler(*bounds["val"])
 
@@ -165,8 +178,8 @@ def main() -> None:
             train_ds, batch_size=cfg["train"]["batch_size"], shuffle=True, collate_fn=collate, **loader_kwargs
         )
 
-        train_metrics = run_epoch(model, train_loader, optimizer, cfg["loss"], beta, device, train=True)
-        val_metrics = run_epoch(model, val_loader, optimizer, cfg["loss"], beta, device, train=False)
+        train_metrics = run_epoch(model, train_loader, optimizer, cfg["loss"], beta, price_scale, device, train=True)
+        val_metrics = run_epoch(model, val_loader, optimizer, cfg["loss"], beta, price_scale, device, train=False)
 
         logger.info(
             "epoch %d/%d  beta=%.2f  train_recon=%.5f (kl=%.4f)  val_recon=%.5f (kl=%.4f)  (%.1fs)",
