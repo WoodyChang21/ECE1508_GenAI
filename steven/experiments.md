@@ -763,3 +763,39 @@ also comes back negative, a lower weight or dropping open/high/low from the loss
 are the remaining untried variants on this specific lever, though given the pattern seen
 across every loss-reweighting attempt so far (directional loss, now this), further tuning
 here looks like a low-probability path.
+
+## hf_patchtst_revin_no_volume_closeweighted walk-forward backtest
+
+**What**: Walk-forward backtest against the close-weighted checkpoints logged above. Same
+methodology as every other backtest on this branch (`steven/src/evaluate_revin.py`,
+coherence-only confidence gate, `min_return_threshold=0.001`, resume-on-resolution).
+
+| Setting | Trades | Win rate | Take-profit rate | Total return | Annual return |
+|---|---|---|---|---|---|
+| baseline (7/7), False | 868 | 69.12% | 57.60% | +9.62% | +6.95% |
+| closeweighted, False | 508 | 68.11% | 56.69% | **-1.91%** | -1.41% |
+| baseline (7/7), True | 535 | 66.36% | 55.14% | +8.06% | +5.87% |
+| closeweighted, True | 558 | 66.49% | 52.15% | **+1.28%** | +0.94% |
+
+**Conclusion: decisively negative -- confirmed by the backtest, not just the forecasting
+metrics.** `False` goes net negative (-1.91% total return); `True` stays positive but at a
+fraction of the baseline's return (+1.28% vs. +8.06%). Unlike the patch-geometry family
+(where a small forecasting-metric regression sometimes preceded a backtest *improvement*),
+close-weighting is consistent across both readings: it hurt forecasting metrics (worse
+close RMSE, lower coherence) and it hurt the backtest. This closes out step 5, the last
+item on the original training-pipeline-review plan, with the same verdict as directional
+loss (the other loss-reweighting lever tried): reweighting the loss toward a
+trading-relevant target does not reliably help that target on this architecture/data, and
+tends to cost coherence for no compensating gain.
+
+**Implication for the branch**: every lever on the original training-pipeline-review plan
+(directional loss, LR schedule, more epochs/early stopping, overlapping/longer patches,
+close-weighted loss) has now been tried on step 4's exact model. Patch geometry remains the
+only lever that produced a real, confirmed backtest improvement (`(14,7)` and `(14,14)`,
+see the leaderboard above) -- every loss-side and optimization-duration lever made things
+worse or, at best, unchanged.
+
+**Caveats**: same test window/methodology as every other backtest on this branch
+(2024-01 to 2025-05, bullish for SPY); one seed per setting; `CLOSE_WEIGHT=4.0` untuned --
+not worth sweeping further given the consistent negative signal across both metrics and
+both settings.
