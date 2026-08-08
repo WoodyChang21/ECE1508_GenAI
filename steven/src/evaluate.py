@@ -38,9 +38,9 @@ import mplfinance as mpf
 import src.data_pipeline as dp
 import src.momentum_pipeline as momentum_pipeline
 from src.data_pipeline import (
-    CONTEXT_LENGTHS,
     HORIZON,
     MAX_CONTEXT,
+    RollingWindowSampler,
     WindowSampler,
     build_dataset,
     build_window,
@@ -66,59 +66,26 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--patchtst-checkpoint", type=str, default="steven/outputs/patchtst_checkpoint.pt")
     p.add_argument("--cvae-checkpoint", type=str, default="steven/outputs/cvae_checkpoint.pt")
-    p.add_argument(
-        "--n-test-windows", type=int, default=100,
-        help="Number of independently-sampled (start_idx, ctx_bars) test windows to draw (spread "
-        "across all 9 context lengths -- see WindowSampler.draw), both models evaluated on the "
-        "identical drawn set. NOT a walk-forward replay -- see module docstring.",
-    )
-    p.add_argument("--num-samples", type=int, default=5, help="K sampled draws per CVAE decision.")
     p.add_argument("--device", type=str, default="auto")
-    p.add_argument("--metrics-out", type=str, default="steven/outputs/metrics.json")
-    p.add_argument("--plots-dir", type=str, default="steven/outputs/sample_plots")
     p.add_argument("--seed", type=int, default=123)
     p.add_argument(
-        "--sell-bound-percentile", type=float, default=99.0,
-        help="Percentile (over train data) of |close_0-anchored log return| used to shrink predicted "
-        "price components -- a tighter, empirically-calibrated bound on top of the model's own "
-        "MAX_LOG_RETURN, applied everywhere. See train_exit_return_bound.",
+        "--ctx-bars", type=int, default=MAX_CONTEXT,
+        help="Fixed context length (bars) used both for the trend classification lookback and for "
+        "every rendered panel -- MAX_CONTEXT (70) by default, same window PatchTST/CVAE were "
+        "trained across.",
+    )
+    p.add_argument("--k-draws", type=int, default=5, help="Number of CVAE sampled draws to render per scenario.")
+    p.add_argument(
+        "--trend-lookback", type=int, default=20,
+        help="Bars of causal context (never the horizon) used to classify a window as uptrend/"
+        "downtrend/choppy -- see classify_trend.",
     )
     p.add_argument(
-        "--cvae-sell-quantile", type=float, default=70.0,
-        help="Percentile (over the K sampled draws' own predicted exit prices) used as CVAE's "
-        "take-profit target, instead of their mean -- higher = a more aggressive target (wider "
-        "profit gap, lower expected chance of filling before the 3-candle order expires). CVAE "
-        "actually has a sampled distribution to pick a target from; PatchTST doesn't (single point "
-        "forecast), so it uses the max of its 3 predicted closes instead (see "
-        "max_close_from_components).",
+        "--step", type=int, default=5,
+        help="Stride (bars) when scanning the test split for candidate windows to classify -- doesn't "
+        "need to be exhaustive, just enough variety to find a clear example of each trend label.",
     )
-    p.add_argument(
-        "--patchtst-min-return-threshold", type=float, default=0.001,
-        help="Minimum PatchTST-predicted exit return (fraction, e.g. 0.001 = 0.1%%) required to bother "
-        "trading at all, on top of the plain target>buy eligibility check -- filters out trades with "
-        "a technically-positive but trivially small predicted edge (see the 'skipped' case in "
-        "classify_walk_forward_decision). A first-pass heuristic, not swept/tuned yet.",
-    )
-    p.add_argument(
-        "--cvae-min-return-threshold", type=float, default=0.0002,
-        help="Same idea as --patchtst-min-return-threshold, but CVAE gets its own value rather than "
-        "sharing PatchTST's: CVAE's predicted edges run roughly an order of magnitude smaller "
-        "(median ~0.04%% vs. PatchTST's ~0.26%% on the checkpoint this default was chosen against), "
-        "so a single shared threshold would systematically over- or under-filter one of the two "
-        "models. Also a first-pass heuristic -- re-check this value after any CVAE retrain that "
-        "might shift its predicted-edge scale again (see backlog.md's 'trade confidence' entry).",
-    )
-    p.add_argument(
-        "--stop-loss-pct", type=float, default=0.02,
-        help="Fraction below entry (e.g. 0.02 = 2%%) at which a trade is force-closed as a loss, on "
-        "top of the take-profit order -- a bracket order (see bracket_exit). SHARED across both "
-        "models, unlike the return thresholds above: the right stop level is about how large a "
-        "genuine adverse move looks like in this one instrument, not about either model's own "
-        "predicted-edge scale. Deliberately loose relative to typical trade sizes (2%% sits just "
-        "outside the training data's own empirical p99 |anchored log return|, ~1.9%% -- see "
-        "train_exit_return_bound), so it only fires on genuine tail moves, not everyday noise -- "
-        "see backlog.md's stop-loss entry for the sweep that motivated this value. <= 0 disables it.",
-    )
+    p.add_argument("--charts-out", type=str, default="steven/outputs/scenario_charts/trend_comparison.png")
     return p.parse_args()
 
 
@@ -792,6 +759,116 @@ def spread(ohlc: np.ndarray) -> float:
     return float(ohlc[:, [0, 3]].max() - ohlc[:, [0, 3]].min())
 
 
+def trend_z_score(feat: np.ndarray, ctx_end: int, ctx_bars: int, body_ret_col: int, lookback: int = 20) -> float:
+    """Causal-only trend strength from context rows [ctx_end-lookback, ctx_end) -- never
+    the horizon: a one-sample z-score of the lookback window's mean body_ret (is the
+    average per-bar move significantly non-zero, relative to its own noise). body_ret_col
+    matches FEATURE_COLS' fixed ordering (open_ret, body_ret, ...) in both the base and
+    momentum-enriched pipelines -- same assumption as generative_metrics.regime_indicators."""
+    n = min(lookback, ctx_bars)
+    window = feat[ctx_end - n : ctx_end, body_ret_col]
+    std = window.std()
+    if std == 0:
+        return 0.0
+    return float(window.mean() / (std / np.sqrt(n)))
+
+
+def classify_trend(z: float) -> str:
+    """z > 0.5 -> uptrend, z < -0.5 -> downtrend, otherwise choppy. See trend_z_score."""
+    if z > 0.5:
+        return "uptrend"
+    if z < -0.5:
+        return "downtrend"
+    return "choppy"
+
+
+def render_scenario_panel(ax, sub_df: pd.DataFrame, title: str) -> None:
+    """Minimal candle panel -- candlesticks + a red box around the horizon region + a
+    title. No buy/sell lines, no trade-decision text, no metrics: this comparison is
+    purely visual (see build_trend_comparison_chart)."""
+    mpf.plot(sub_df, type="candle", ax=ax, style="yahoo", volume=False)
+    ax.set_title(title, fontsize=9)
+    ax.tick_params(axis="x", labelrotation=30, labelsize=6)
+    draw_horizon_box(ax, len(sub_df))
+
+
+def build_trend_comparison_chart(
+    df: pd.DataFrame, feat: np.ndarray, opens: np.ndarray, closes: np.ndarray,
+    patchtst, cvae, bounds: dict, device: torch.device, ctx_bars: int, k_draws: int,
+    trend_lookback: int, step: int, out_path: Path,
+) -> None:
+    """Rows = uptrend/downtrend/choppy (one representative window per label -- the one
+    closest to that label's own median trend-z, for reproducibility), columns = [ground
+    truth, PatchTST's single predicted path, k_draws CVAE sampled draws]. Purely visual:
+    no metrics, no trade decisions, no backtest -- just "what do these three sources look
+    like for a few different kinds of market context." See generative_plots.py's
+    build_regime_grid for the closest existing precedent (regime bucketing instead of
+    trend, CVAE-only)."""
+    body_ret_col = dp.FEATURE_COLS.index("body_ret")
+    lo, hi = bounds["test"]
+    pairs = RollingWindowSampler(lo, hi, ctx_bars, step=step).pairs()
+
+    # Trend classification is cheap (pure feat-array slicing, no model calls) and run over
+    # every scanned window; inference is only run on the 3 windows actually picked below --
+    # to_patchtst_input is single-window only (slices axis 0 as time), so batching it over
+    # every candidate window would be both wrong and wasteful.
+    trend_z = np.array([
+        trend_z_score(feat, s + c, c, body_ret_col, lookback=trend_lookback) for s, c in pairs
+    ])
+    labels = np.array([classify_trend(z) for z in trend_z])
+
+    n_cols = 2 + k_draws
+    fig, axes = plt.subplots(3, n_cols, figsize=(3 * n_cols, 3.2 * 3))
+    for row, label in enumerate(["uptrend", "downtrend", "choppy"]):
+        idx_pool = np.where(labels == label)[0]
+        if len(idx_pool) == 0:
+            logger.warning("no windows classified as %s -- skipping row", label)
+            continue
+        median_z = np.median(trend_z[idx_pool])
+        i = idx_pool[np.argmin(np.abs(trend_z[idx_pool] - median_z))]
+        start_idx, this_ctx = pairs[i]
+
+        w = build_window(feat, opens, closes, start_idx, this_ctx)
+        masked_t = torch.from_numpy(w["masked_tensor"])[None].to(device)
+        with torch.no_grad():
+            pt_context, pt_patch_pad = to_patchtst_input(w["masked_tensor"])
+            pt_price_t, _ = patchtst(
+                torch.from_numpy(pt_context)[None].to(device), torch.from_numpy(pt_patch_pad)[None].to(device)
+            )
+            cvae_price_t, _ = cvae.sample(masked_t, k=k_draws)  # (K,1,3,4)
+        pt_price = pt_price_t.cpu().numpy()[0]  # (3,4)
+        cvae_price = cvae_price_t.cpu().numpy()[:, 0]  # (K,3,4)
+
+        ctx_tail = min(this_ctx, 20)
+        hz_start = start_idx + this_ctx
+        plot_rows = df.iloc[hz_start - ctx_tail : hz_start + HORIZON]
+        true_df = plot_rows.set_index("datetime")[["open", "high", "low", "close", "volume"]]
+        close_0 = float(df.iloc[hz_start - 1]["close"])
+
+        render_scenario_panel(axes[row, 0], true_df, f"{label}\nGround truth")
+
+        pt_ohlc = reconstruct_prices(pt_price, close_0)
+        pt_df = true_df.copy()
+        pt_df.loc[pt_df.index[-HORIZON:], ["open", "high", "low", "close"]] = pt_ohlc
+        render_scenario_panel(axes[row, 1], pt_df, "PatchTST")
+
+        for col in range(k_draws):
+            gen_ohlc = reconstruct_prices(cvae_price[col], close_0)
+            gen_df = true_df.copy()
+            gen_df.loc[gen_df.index[-HORIZON:], ["open", "high", "low", "close"]] = gen_ohlc
+            render_scenario_panel(axes[row, 2 + col], gen_df, f"CVAE draw {col}")
+
+    fig.suptitle(
+        f"Trend scenario comparison (ctx_bars={ctx_bars}) -- rows: uptrend/downtrend/choppy context, "
+        "columns: ground truth vs. PatchTST's single prediction vs. CVAE's sampled draws"
+    )
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("wrote trend comparison chart to %s", out_path)
+
+
 def make_plots(df: pd.DataFrame, pt_decisions: list[dict], cvae_decisions: list[dict], args) -> None:
     """Selects one illustrative example per CASE_LABELS, sourced from CVAE's own
     walk-forward decision log (not a separate random-sample population -- an earlier
@@ -1140,12 +1217,6 @@ def main() -> None:
         df, bounds, stats = build_dataset(pt_cfg["data_path"])
     feat, opens, closes = extract_arrays(df)
 
-    sell_bound = train_exit_return_bound(opens, closes, bounds["train"], percentile=args.sell_bound_percentile)
-    logger.info(
-        "sell-price shrink bound: p%.1f of |anchored log return| over train = %.4f (vs. model's own MAX_LOG_RETURN)",
-        args.sell_bound_percentile, sell_bound,
-    )
-
     patchtst = PatchTST(**pt_cfg["model"], n_feature_channels=dp.N_FEATURE_CHANNELS).to(device)
     patchtst.load_state_dict(pt_ckpt["model_state"])
     patchtst.eval()
@@ -1154,50 +1225,15 @@ def main() -> None:
     cvae.load_state_dict(cvae_ckpt["model_state"])
     cvae.eval()
 
-    test_sampler = WindowSampler(*bounds["test"])
-    rng = np.random.default_rng(args.seed)
-    test_pairs = test_sampler.draw(args.n_test_windows, rng)
-
     logger.info(
-        "evaluating on %d randomly-sampled test windows (spread across %d context lengths, "
-        "no walk-forward, no confidence sweep -- patchtst_min_return>=%.3f%%, "
-        "cvae_min_return>=%.3f%% [no CVAE quality gate -- see backlog.md], stop_loss=%.2f%% "
-        "[shared, whichever hits first, stop-loss wins same-bar ties -- see bracket_exit])...",
-        len(test_pairs), len(CONTEXT_LENGTHS), args.patchtst_min_return_threshold * 100,
-        args.cvae_min_return_threshold * 100, args.stop_loss_pct * 100,
+        "rendering a trend scenario comparison (ctx_bars=%d, k_draws=%d) -- purely visual, "
+        "no metrics/backtest/trade decisions",
+        args.ctx_bars, args.k_draws,
     )
-    pt_predict = make_patchtst_predict_fn(patchtst, device, sell_bound)
-    cvae_predict = make_cvae_predict_fn(cvae, device, sell_bound, args.num_samples, args.cvae_sell_quantile)
-    pt_result = run_random_sample_backtest(
-        pt_predict, feat, opens, closes, test_pairs, args.patchtst_min_return_threshold, args.stop_loss_pct,
+    build_trend_comparison_chart(
+        df, feat, opens, closes, patchtst, cvae, bounds, device,
+        args.ctx_bars, args.k_draws, args.trend_lookback, args.step, Path(args.charts_out),
     )
-    cvae_result = run_random_sample_backtest(
-        cvae_predict, feat, opens, closes, test_pairs, args.cvae_min_return_threshold, args.stop_loss_pct,
-    )
-    logger.info(
-        "random-sample: PatchTST %d trades / %d decisions, CVAE %d trades / %d decisions",
-        random_sample_stats(pt_result)["n_trades"], len(pt_result["decisions"]),
-        random_sample_stats(cvae_result)["n_trades"], len(cvae_result["decisions"]),
-    )
-
-    results = {
-        "random_sample": {
-            "n_test_windows": len(test_pairs),
-            "patchtst_min_return_threshold": args.patchtst_min_return_threshold,
-            "cvae_min_return_threshold": args.cvae_min_return_threshold,
-            "stop_loss_pct": args.stop_loss_pct,
-            "patchtst": random_sample_stats(pt_result),
-            "cvae": random_sample_stats(cvae_result),
-        }
-    }
-
-    Path(args.metrics_out).parent.mkdir(parents=True, exist_ok=True)
-    with open(args.metrics_out, "w") as f:
-        json.dump(results, f, indent=2)
-    logger.info("wrote metrics to %s", args.metrics_out)
-    logger.info("random_sample: %s", json.dumps(results["random_sample"], indent=2))
-
-    make_random_sample_plots(df, pt_result["decisions"], cvae_result["decisions"], args)
 
 
 if __name__ == "__main__":
