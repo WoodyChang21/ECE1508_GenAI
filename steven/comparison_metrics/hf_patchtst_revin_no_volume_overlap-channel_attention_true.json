@@ -1,0 +1,24 @@
+{
+  "experiment": {
+    "name": "hf_patchtst_revin_no_volume_overlap",
+    "description": "hf_patchtst_revin_no_volume (step 4) with patch_length changed from 7 to 14 (patch_stride stays 7, so patches now overlap 50%, 9 patches instead of 10) -- standard PatchTST practice uses overlapping patches (stride < length); this branch's non-overlapping convention was untested. Everything else identical to step 4: 20 epochs, flat LR=6e-4, plain RevIN MSE loss, no directional term -- isolated from the training-duration/loss-engineering levers already ruled out.",
+    "target": "raw_price_revin_no_volume",
+    "include_volume": false,
+    "loss_weights": {
+      "note": "unweighted -- single RevIN-normalized MSE over the 4 OHLC channels"
+    },
+    "channel_attention": true,
+    "seed": 0
+  },
+  "best_val_loss": 0.11635397771994273,
+  "best_val_epoch": 20,
+  "n_windows": 2397,
+  "ohlc_mae": 1.7569210529327393,
+  "ohlc_rmse": 3.040311574935913,
+  "directional_accuracy": [
+    0.5214851898206091,
+    0.5340008343763037,
+    0.5452649144764289
+  ],
+  "coherence_rate": 0.9011264080100125
+}
