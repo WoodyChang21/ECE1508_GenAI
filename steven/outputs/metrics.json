@@ -27,8 +27,8 @@
         "win_expiry": 0.0,
         "lose_expiry": 0.0,
         "lose_stop_loss": 0.0,
-        "skipped": 0.12,
-        "no_trade": 0.88
+        "skipped": 0.03,
+        "no_trade": 0.97
       },
       "win_rate": null,
       "take_profit_rate": null,
