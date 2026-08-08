@@ -639,3 +639,50 @@ candidate to beat or match `(14,7)`'s +9.68%/+12.81% total return -- to be confi
 accuracy in the lost run -- not worth the Colab time to reproduce for confirmation only,
 though their exact numbers are only preserved in this conversation's history, not in a
 pushed comparison_metrics file.
+
+## hf_patchtst_revin_no_volume_patch14_14 walk-forward backtest
+
+**What**: Walk-forward backtest against the `(14, 14)` checkpoints logged above. Same
+methodology as every other backtest on this branch (`steven/src/evaluate_revin.py`,
+coherence-only confidence gate, `min_return_threshold=0.001`, resume-on-resolution).
+
+| Setting | Trades | Win rate | Take-profit rate | Total return | Annual return |
+|---|---|---|---|---|---|
+| baseline (7/7), False | 868 | 69.12% | 57.60% | +9.62% | +6.95% |
+| overlap winner (14/7), False | 584 | 75.68% | 71.40% | +9.68% | +6.99% |
+| **(14/14), False** | 626 | 72.68% | 67.25% | **+14.47%** | **+10.39%** |
+| baseline (7/7), True | 535 | 66.36% | 55.14% | +8.06% | +5.87% |
+| overlap winner (14/7), True | 527 | 75.14% | 72.30% | **+12.81%** | **+9.23%** |
+| **(14/14), True** | 705 | 70.07% | 61.56% | **-0.18%** | **-0.13%** |
+
+**Conclusion: a sharp, asymmetric result -- the best single backtest on the branch for one
+setting, and a near-total collapse of the edge for the other.** `channel_attention=False`
+produces the best result seen on this branch: +14.47% total return / +10.39% annualized,
+beating even `(14,7)`'s prior best. `channel_attention=True`, which was the standout
+winner under `(14,7)` (+12.81%), collapses to essentially break-even under `(14,14)`
+(-0.18%). Confidence calibration for the `True` checkpoint still looks healthy in
+isolation -- coherent-up win rate 76.0%, direction accuracy 0.559 within the coherent
+bucket, both in line with every other well-behaved run on this branch -- so this isn't an
+obviously broken or miscalibrated model; something about the specific sequence/timing of
+trades this exact config produces for `True` erased the edge, not a correctness failure
+visible in the calibration numbers alone.
+
+**Implication: patch geometry interacts with `channel_attention` non-additively -- there
+is no single "best patch config," only best-config-per-setting.** `(14,7)` was the better
+choice for `True`; `(14,14)` is clearly the better choice for `False`. Forecasting metrics
+for `(14,14)` (RMSE, dir acc, coherence) were close between `False` and `True` and gave no
+hint of this backtest divergence -- another data point for the branch's standing caveat
+that forecasting metrics don't reliably predict backtest outcomes, now shown to fail even
+at predicting *which channel_attention setting* will do well for a given architecture
+change, not just whether a change helps at all.
+
+**Practical recommendation**: if deploying a single model, `(14,14)` with
+`channel_attention=False` is now the strongest candidate on the branch. If keeping both
+settings in play, `(14,7)`'s `True` and `(14,14)`'s `False` are each other's counterparts
+as the two best individual results found so far.
+
+**Caveats**: same test window/methodology as every other backtest on this branch
+(2024-01 to 2025-05, bullish for SPY); one seed per setting -- given how sharply this
+result diverges by setting, seed noise is a live concern here more than anywhere else on
+the branch, and multi-seed confirmation (currently deferred) would be especially valuable
+before treating either number as a stable estimate.
