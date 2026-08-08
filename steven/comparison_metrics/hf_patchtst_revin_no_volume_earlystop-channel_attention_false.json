@@ -1,0 +1,25 @@
+{
+  "experiment": {
+    "name": "hf_patchtst_revin_no_volume_earlystop",
+    "description": "hf_patchtst_revin_no_volume (step 4) with early stopping added (patience on val loss) and MAX_EPOCHS raised from 20 to 100 -- now that early stopping makes a high ceiling safe, training runs until val loss genuinely stops improving instead of being cut off at a hand-picked fixed epoch count. Flat LR=6e-4 unchanged (no schedule) -- the cosine-schedule experiment already showed converging faster/harder hurts directional accuracy/coherence, so this isolates 'run until done' from 'push harder'.",
+    "target": "raw_price_revin_no_volume",
+    "include_volume": false,
+    "loss_weights": {
+      "note": "unweighted -- single RevIN-normalized MSE over the 4 OHLC channels"
+    },
+    "channel_attention": false,
+    "seed": 0
+  },
+  "best_val_loss": 7.569117923655236e-05,
+  "best_val_epoch": 100,
+  "stopped_epoch": 100,
+  "n_windows": 2397,
+  "ohlc_mae": 1.9137144088745117,
+  "ohlc_rmse": 3.131793737411499,
+  "directional_accuracy": [
+    0.4789319983312474,
+    0.4806007509386733,
+    0.4618272841051314
+  ],
+  "coherence_rate": 0.9090529828952858
+}
