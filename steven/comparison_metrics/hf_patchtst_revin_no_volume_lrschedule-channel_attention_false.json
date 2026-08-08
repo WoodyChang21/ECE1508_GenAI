@@ -1,0 +1,23 @@
+{
+  "experiment": {
+    "name": "hf_patchtst_revin_no_volume_lrschedule",
+    "description": "hf_patchtst_revin_no_volume (step 4) + a cosine-annealing LR schedule (6e-4 -> 6e-6 over 20 epochs), no warmup. Everything else identical to step 4 (same architecture, same plain RevIN MSE loss, no directional term) -- tests whether letting the optimizer settle more precisely in later epochs, instead of training at a flat 6e-4 the whole time, improves RMSE/directional accuracy/coherence over step 4's baseline.",
+    "target": "raw_price_revin_no_volume",
+    "include_volume": false,
+    "loss_weights": {
+      "note": "unweighted -- single RevIN-normalized MSE over the 4 OHLC channels"
+    },
+    "channel_attention": false,
+    "seed": 0
+  },
+  "best_val_loss": 0.17564567518234253,
+  "n_windows": 2397,
+  "ohlc_mae": 1.7532609701156616,
+  "ohlc_rmse": 3.0546624660491943,
+  "directional_accuracy": [
+    0.5006257822277848,
+    0.5252398831873175,
+    0.5219023779724656
+  ],
+  "coherence_rate": 0.9107217355027117
+}
