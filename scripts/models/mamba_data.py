@@ -11,13 +11,45 @@ import torch
 from torch.utils.data import Dataset
 
 
+FEATURE_SCHEMA_VERSION = 2
+
+# Names presented to the model. Price-level features are deliberately expressed
+# as relative distances so a model trained when SPY traded near 250 does not see
+# every 550-dollar test observation as an outlier.
 FEATURE_COLUMNS = (
     "return_1h",  # target is deliberately first
+    "open_to_previous_close",
+    "high_to_close",
+    "low_to_close",
+    "close_to_open",
+    "return_4h",
+    "return_24h",
+    "is_first_bar",
+    "bar_time_sin",
+    "bar_time_cos",
+    "day_of_week_sin",
+    "day_of_week_cos",
+    "vol_24h",
+    "vol_60h",
+    "log_volume_ratio",
+    "rsi_centered",
+    "macd_relative",
+    "macd_signal_relative",
+    "macd_diff_relative",
+    "bb_upper_distance",
+    "bb_lower_distance",
+    "bb_width",
+    "vix_change_1h",
+)
+TARGET_INDEX = 0
+
+SOURCE_COLUMNS = (
+    "datetime",
+    "return_1h",
     "open",
     "high",
     "low",
     "close",
-    "volume",
     "return_4h",
     "return_24h",
     "is_first_bar",
@@ -31,10 +63,8 @@ FEATURE_COLUMNS = (
     "bb_upper",
     "bb_lower",
     "bb_width",
-    "vix_log",
     "vix_change_1h",
 )
-TARGET_INDEX = 0
 
 
 @dataclass(frozen=True)
@@ -113,13 +143,60 @@ class WindowDataset(Dataset):
         return window, target
 
 
-def load_split(path: str | Path) -> tuple[pd.DataFrame, np.ndarray]:
-    """Load and validate one model split, returning frame and float features."""
-    frame = pd.read_parquet(path)
-    missing = [column for column in FEATURE_COLUMNS if column not in frame]
+def model_feature_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Build stationary, calendar-aware model inputs from a raw split."""
+    missing = [column for column in SOURCE_COLUMNS if column not in frame]
     if missing:
-        raise ValueError(f"{path} is missing columns: {missing}")
-    values = frame.loc[:, FEATURE_COLUMNS].astype(np.float32).to_numpy()
+        raise ValueError(f"input frame is missing columns: {missing}")
+
+    close = frame["close"].astype(np.float64)
+    previous_close = close / (1.0 + frame["return_1h"].astype(np.float64))
+    timestamps = pd.to_datetime(frame["datetime"])
+    bar_number = (
+        timestamps.dt.hour * 60 + timestamps.dt.minute - (9 * 60 + 30)
+    ) / 60.0
+    bar_phase = 2.0 * np.pi * bar_number / 7.0
+    weekday_phase = 2.0 * np.pi * timestamps.dt.dayofweek / 5.0
+
+    features = pd.DataFrame(
+        {
+            "return_1h": frame["return_1h"],
+            "open_to_previous_close": frame["open"] / previous_close - 1.0,
+            "high_to_close": frame["high"] / close - 1.0,
+            "low_to_close": frame["low"] / close - 1.0,
+            "close_to_open": close / frame["open"] - 1.0,
+            "return_4h": frame["return_4h"],
+            "return_24h": frame["return_24h"],
+            "is_first_bar": frame["is_first_bar"].astype(np.float64),
+            "bar_time_sin": np.sin(bar_phase),
+            "bar_time_cos": np.cos(bar_phase),
+            "day_of_week_sin": np.sin(weekday_phase),
+            "day_of_week_cos": np.cos(weekday_phase),
+            "vol_24h": frame["vol_24h"],
+            "vol_60h": frame["vol_60h"],
+            "log_volume_ratio": np.log(frame["volume_ratio"].clip(lower=1e-8)),
+            "rsi_centered": (frame["rsi_14"] - 50.0) / 50.0,
+            "macd_relative": frame["macd"] / close,
+            "macd_signal_relative": frame["macd_signal"] / close,
+            "macd_diff_relative": frame["macd_diff"] / close,
+            "bb_upper_distance": frame["bb_upper"] / close - 1.0,
+            "bb_lower_distance": close / frame["bb_lower"] - 1.0,
+            "bb_width": frame["bb_width"],
+            "vix_change_1h": frame["vix_change_1h"],
+        },
+        index=frame.index,
+    )
+    return features.loc[:, FEATURE_COLUMNS]
+
+
+def load_split(path: str | Path) -> tuple[pd.DataFrame, np.ndarray]:
+    """Load one split and return its raw frame plus derived model features."""
+    frame = pd.read_parquet(path)
+    try:
+        feature_frame = model_feature_frame(frame)
+    except ValueError as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+    values = feature_frame.astype(np.float32).to_numpy()
     if not np.isfinite(values).all():
         raise ValueError(f"{path} contains non-finite model inputs")
     return frame, values

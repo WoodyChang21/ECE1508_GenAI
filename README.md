@@ -1,6 +1,6 @@
 # ECE1508 GenAI — Intraday SPY Forecasting with Mamba
 
-This project forecasts the next three intraday SPY (S&P 500 ETF) returns together with **Mamba**, an attention-free selective state-space model. Each hourly row is projected from the target plus 20 historical market features into a continuous embedding; causal Mamba blocks process the lookback window and the final hidden state predicts the three-return path. A one-step compatibility mode remains available with `--forecast-horizon 1`.
+This project forecasts the next three intraday SPY (S&P 500 ETF) returns together with **Mamba**, an attention-free selective state-space model. Raw market columns are converted into 23 stationary, calendar-aware inputs before each hourly row is projected into a continuous embedding; causal Mamba blocks process the lookback window and the final hidden state predicts the three-return path. A one-step compatibility mode remains available with `--forecast-horizon 1`.
 
 ---
 
@@ -256,7 +256,9 @@ pip install -r requirements-model.txt
 python scripts/models/train_mamba.py
 ```
 
-The default run predicts three future hourly returns together and tunes lookbacks `[24, 60, 120]` on the validation MAE of the compounded three-candle return. It retrains the selected configuration on train+validation data, evaluates the held-out test set, and writes `data/predictions/mamba_preds.parquet`. Scaling is fitted on training data during tuning and on train+validation data only for final training. The test target is never used for fitting or interval calibration.
+The default run predicts three future hourly returns together and tunes lookbacks `[24, 60, 120]` on the validation MAE of the compounded three-candle return. Raw price levels are converted into relative candle and indicator distances; VIXY's drifting level is omitted in favor of its return; and bar-time/day-of-week cycles are included. The training loss combines per-step Huber loss, compounded-horizon loss, and a lightly weighted horizon-direction loss.
+
+The first 70% of validation is used for model selection and is included in the final fit. The chronological final 30% remains completely outside model fitting and is used only for residual-interval calibration and selection of one deployment threshold after transaction costs. That locked policy is stored in the checkpoint. The test target is never used for fitting, calibration, or strategy selection.
 
 The output retains the comparison schema (`datetime`, `y`, `pred`, interval bounds, and `model`), where `y` and `pred` are compounded horizon returns. It also includes `y_h1`...`y_h3` and `pred_h1`...`pred_h3`, plus the horizon end time. Intervals are formed from validation residual quantiles of the compounded return.
 
@@ -268,7 +270,7 @@ python scripts/models/train_mamba.py --lookbacks 24 --epochs 1 \
   --limit-test 64 --output data/predictions/mamba_smoke.parquet
 ```
 
-The full default search is intended for a GPU. Hugging Face Transformers provides a slower sequential Mamba fallback when optimized kernels are unavailable, so CPU execution remains supported but can take substantially longer.
+The full default search is intended for a GPU. Hugging Face Transformers provides a slower sequential Mamba fallback when optimized kernels are unavailable, so CPU execution remains supported but can take substantially longer. The Colab notebook installs the optional `kernels` package to enable a compatible optimized path when available.
 
 ### Evaluate a saved Colab checkpoint
 
@@ -295,9 +297,9 @@ python scripts/models/evaluate_mamba.py \
   --transaction-cost-bps 1
 ```
 
-Both modes write a full report to `data/predictions/mamba_eval.json`; checkpoint mode also writes fresh forecasts to `data/predictions/mamba_eval.parquet`. For a three-step checkpoint, the report includes cumulative-return and all-three-agree threshold sweeps for combined long/short, long-only, and short-only trading. Positions are held for exactly three candles, only one position may be open, and entry and exit costs are charged. The evaluator intentionally does not simulate Steven's take-profit because Mamba predicts returns rather than future OHLC ranges. A legacy one-step checkpoint continues to produce the original one-period sign-strategy report.
+Both modes write a full report to `data/predictions/mamba_eval.json`; checkpoint mode also writes fresh forecasts to `data/predictions/mamba_eval.parquet`. For a three-step v2 checkpoint, `locked_strategy` is the primary strategy result because its rule and threshold were selected on the held-out validation calibration tail. Test-set threshold sweeps remain available but are explicitly labeled exploratory. Because the 2024–2025 test results informed the v2 design, a later unseen period or walk-forward replay is still required for a genuinely pristine performance claim. Positions are held for exactly three candles, only one position may be open, and entry and exit costs are charged.
 
-The evaluator checks the saved feature order, model settings, scaler, lookback, and forecast horizon. The checkpoint format does not store hashes of the data files, so use the same `val.parquet` and `test.parquet` versions that were present in Colab.
+The evaluator checks the saved feature schema version and order, model settings, scaler, lookback, forecast horizon, and SHA-256 hashes of the validation/test files. This prevents accidentally evaluating a checkpoint against different data. Feature-schema v1 checkpoints must be evaluated with their original checkout; v2 intentionally rejects them because the model inputs changed.
 
 ### Run tests
 

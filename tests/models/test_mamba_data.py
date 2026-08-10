@@ -1,6 +1,13 @@
 import numpy as np
+import pandas as pd
 
-from scripts.models.mamba_data import WindowDataset, ZScoreScaler, with_history
+from scripts.models.mamba_data import (
+    FEATURE_COLUMNS,
+    WindowDataset,
+    ZScoreScaler,
+    model_feature_frame,
+    with_history,
+)
 
 
 def test_scaler_round_trip_target():
@@ -61,3 +68,51 @@ def test_history_multi_step_targets_stay_inside_current_split():
 
     np.testing.assert_array_equal(first_target.numpy(), current[:3, 0])
     assert len(dataset) == 3
+
+
+def test_model_features_are_invariant_to_price_level_rescaling():
+    frame = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2024-01-02 09:30", periods=3, freq="h"),
+            "return_1h": [0.01, -0.005, 0.002],
+            "open": [100.0, 101.0, 100.5],
+            "high": [102.0, 102.0, 101.5],
+            "low": [99.0, 100.0, 100.0],
+            "close": [101.0, 100.5, 101.0],
+            "volume": [1_000_000, 900_000, 1_100_000],
+            "return_4h": [0.01, 0.005, 0.007],
+            "return_24h": [0.02, 0.01, 0.015],
+            "is_first_bar": [True, False, False],
+            "vol_24h": [0.01, 0.01, 0.01],
+            "vol_60h": [0.012, 0.012, 0.012],
+            "volume_ratio": [1.1, 0.9, 1.2],
+            "rsi_14": [55.0, 50.0, 52.0],
+            "macd": [1.0, 0.8, 0.9],
+            "macd_signal": [0.9, 0.85, 0.88],
+            "macd_diff": [0.1, -0.05, 0.02],
+            "bb_upper": [105.0, 105.0, 105.5],
+            "bb_lower": [95.0, 95.0, 95.5],
+            "bb_width": [10.0, 10.0, 10.0],
+            "vix_change_1h": [0.01, -0.02, 0.0],
+        }
+    )
+    scaled_prices = frame.copy()
+    price_columns = [
+        "open",
+        "high",
+        "low",
+        "close",
+        "macd",
+        "macd_signal",
+        "macd_diff",
+        "bb_upper",
+        "bb_lower",
+    ]
+    scaled_prices.loc[:, price_columns] *= 5.0
+
+    actual = model_feature_frame(frame)
+    rescaled = model_feature_frame(scaled_prices)
+
+    assert tuple(actual.columns) == FEATURE_COLUMNS
+    np.testing.assert_allclose(actual, rescaled, rtol=1e-10, atol=1e-10)
+    assert np.isfinite(actual.to_numpy()).all()

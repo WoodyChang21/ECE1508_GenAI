@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.models.mamba_data import (  # noqa: E402
     FEATURE_COLUMNS,
+    FEATURE_SCHEMA_VERSION,
     TARGET_INDEX,
     ZScoreScaler,
     load_split,
@@ -42,9 +43,16 @@ from scripts.models.metrics import (  # noqa: E402
     mae,
     rmse,
 )
+from scripts.models.mamba_strategy import (  # noqa: E402
+    compounded_return as _compounded_return,
+    max_drawdown as _max_drawdown,
+    multi_period_strategy_metrics,
+    timeline_from_horizon_windows as _timeline_from_horizon_windows,
+)
 from scripts.models.train_mamba import (  # noqa: E402
     ModelOptions,
     compound_horizon,
+    file_sha256,
     make_model,
     predict,
     resolve_device,
@@ -136,6 +144,12 @@ def validate_checkpoint(checkpoint: dict[str, Any]) -> None:
         raise ValueError(
             "checkpoint feature columns/order do not match this checkout: "
             f"expected {list(FEATURE_COLUMNS)}, got {list(checkpoint_features)}"
+        )
+    schema_version = int(checkpoint.get("feature_schema_version", 1))
+    if schema_version != FEATURE_SCHEMA_VERSION:
+        raise ValueError(
+            f"checkpoint feature schema version is {schema_version}; "
+            f"this checkout expects {FEATURE_SCHEMA_VERSION}"
         )
 
     lookback = int(checkpoint["lookback"])
@@ -253,18 +267,6 @@ def interval_metrics(
     }
 
 
-def _compounded_return(returns: np.ndarray) -> float:
-    return float(np.prod(1.0 + returns, dtype=np.float64) - 1.0)
-
-
-def _max_drawdown(returns: np.ndarray) -> float:
-    equity = np.concatenate(
-        [np.ones(1, dtype=np.float64), np.cumprod(1.0 + returns, dtype=np.float64)]
-    )
-    running_high = np.maximum.accumulate(equity)
-    return float(np.min(equity / running_high - 1.0))
-
-
 def strategy_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
@@ -323,130 +325,6 @@ def strategy_metrics(
             float(np.mean(np.sign(y_true[active]) == positions[active]))
             if active.any()
             else None
-        ),
-        "gross_compounded_return": _compounded_return(gross_returns),
-        "net_compounded_return": _compounded_return(net_returns),
-        "annualized_net_sharpe": sharpe,
-        "net_max_drawdown": _max_drawdown(net_returns),
-    }
-
-
-def _timeline_from_horizon_windows(y_steps: np.ndarray) -> np.ndarray:
-    """Recover the chronological return series from overlapping horizon labels."""
-    values = np.asarray(y_steps, dtype=np.float64)
-    if values.ndim != 2 or values.shape[0] == 0 or values.shape[1] == 0:
-        raise ValueError("horizon targets must be a non-empty 2D array")
-    if values.shape[1] == 1:
-        return values[:, 0].copy()
-    return np.concatenate([values[:, 0], values[-1, 1:]])
-
-
-def multi_period_strategy_metrics(
-    y_true_steps: np.ndarray,
-    y_pred_steps: np.ndarray,
-    threshold_bps: float,
-    transaction_cost_bps: float,
-    periods_per_year: int,
-    position_mode: str = "long_short",
-    require_all_steps_agree: bool = False,
-) -> dict[str, float | int | str | bool | None]:
-    """Backtest fixed-horizon forecasts with at most one open position.
-
-    A forecast is considered whenever the strategy is flat. If selected, the
-    position is held for the complete forecast horizon and the next decision is
-    made only after it closes. This prevents the overlapping-window double
-    counting present in many multi-horizon diagnostic backtests.
-    """
-    y_true_steps = np.asarray(y_true_steps, dtype=np.float64)
-    y_pred_steps = np.asarray(y_pred_steps, dtype=np.float64)
-    if (
-        y_true_steps.shape != y_pred_steps.shape
-        or y_true_steps.ndim != 2
-        or y_true_steps.shape[0] == 0
-        or y_true_steps.shape[1] < 2
-    ):
-        raise ValueError("step targets/predictions must be equal non-empty 2D arrays")
-    if threshold_bps < 0 or transaction_cost_bps < 0:
-        raise ValueError("thresholds and transaction costs must be non-negative")
-    if periods_per_year < 1:
-        raise ValueError("periods_per_year must be positive")
-    if position_mode not in {"long_short", "long_only", "short_only"}:
-        raise ValueError(
-            "position_mode must be 'long_short', 'long_only', or 'short_only'"
-        )
-
-    horizon = y_true_steps.shape[1]
-    actual_timeline = _timeline_from_horizon_windows(y_true_steps)
-    positions = np.zeros_like(actual_timeline)
-    costs = np.zeros_like(actual_timeline)
-    threshold = threshold_bps / 10_000.0
-    one_way_cost = transaction_cost_bps / 10_000.0
-    trades: list[tuple[int, int, float]] = []
-
-    window = 0
-    while window < len(y_pred_steps):
-        predicted_path = y_pred_steps[window]
-        predicted_return = float(np.prod(1.0 + predicted_path) - 1.0)
-        direction = float(np.sign(predicted_return))
-        selected = direction != 0.0 and abs(predicted_return) >= threshold
-        if position_mode == "long_only":
-            selected = selected and direction > 0
-        elif position_mode == "short_only":
-            selected = selected and direction < 0
-        if require_all_steps_agree:
-            selected = selected and bool((np.sign(predicted_path) == direction).all())
-
-        if not selected:
-            window += 1
-            continue
-
-        end = window + horizon
-        positions[window:end] = direction
-        costs[window] += one_way_cost
-        costs[end - 1] += one_way_cost
-        trades.append((window, end, direction))
-        window = end
-
-    gross_returns = positions * actual_timeline
-    net_returns = gross_returns - costs
-    active = positions != 0
-    trade_returns = np.asarray(
-        [
-            _compounded_return(net_returns[start:end])
-            for start, end, _ in trades
-        ],
-        dtype=np.float64,
-    )
-    net_std = float(np.std(net_returns))
-    sharpe = None
-    if net_std > 0:
-        sharpe = float(
-            np.mean(net_returns) / net_std * np.sqrt(float(periods_per_year))
-        )
-
-    return {
-        "position_mode": position_mode,
-        "forecast_horizon": horizon,
-        "signal_rule": (
-            "cumulative_return_and_all_steps_agree"
-            if require_all_steps_agree
-            else "cumulative_return"
-        ),
-        "threshold_bps": float(threshold_bps),
-        "trades": len(trades),
-        "active_periods": int(active.sum()),
-        "exposure": float(active.mean()),
-        "position_turnover": float(2 * len(trades)),
-        "directional_accuracy_when_active": (
-            float(np.mean(np.sign(actual_timeline[active]) == positions[active]))
-            if active.any()
-            else None
-        ),
-        "net_trade_win_rate": (
-            float(np.mean(trade_returns > 0)) if len(trade_returns) else None
-        ),
-        "mean_net_trade_return": (
-            float(np.mean(trade_returns)) if len(trade_returns) else None
         ),
         "gross_compounded_return": _compounded_return(gross_returns),
         "net_compounded_return": _compounded_return(net_returns),
@@ -648,6 +526,16 @@ def main() -> None:
         device = resolve_device(args.device)
         checkpoint = _torch_load(args.checkpoint, device)
         validate_checkpoint(checkpoint)
+        expected_hashes = checkpoint.get("data_sha256")
+        data_identity = "unverified_legacy_checkpoint"
+        if isinstance(expected_hashes, dict):
+            actual_history_hash = file_sha256(args.history)
+            actual_test_hash = file_sha256(args.test)
+            if actual_history_hash != expected_hashes.get("val"):
+                raise ValueError("history split SHA-256 does not match the checkpoint")
+            if actual_test_hash != expected_hashes.get("test"):
+                raise ValueError("test split SHA-256 does not match the checkpoint")
+            data_identity = "verified_sha256"
 
         options = ModelOptions(**checkpoint["model_options"])
         lookback = int(checkpoint["lookback"])
@@ -730,11 +618,8 @@ def main() -> None:
             "lookback": lookback,
             "forecast_horizon": forecast_horizon,
             "feature_columns": list(FEATURE_COLUMNS),
-            "data_identity_warning": (
-                "This checkpoint format stores the feature schema but no data-file "
-                "hash. Confirm that these test/history splits match the data version "
-                "used in Colab."
-            ),
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "data_identity": data_identity,
         }
     else:
         predictions = load_prediction_frame(args.predictions)
@@ -775,6 +660,34 @@ def main() -> None:
         y_true_steps=y_true_steps,
         y_pred_steps=y_pred_steps,
     )
+    if args.checkpoint and forecast_horizon > 1:
+        policy = checkpoint.get("strategy_policy")
+        if isinstance(policy, dict):
+            locked_result = multi_period_strategy_metrics(
+                y_true_steps,
+                y_pred_steps,
+                threshold_bps=float(policy["threshold_bps"]),
+                transaction_cost_bps=float(policy["transaction_cost_bps"]),
+                periods_per_year=int(policy["periods_per_year"]),
+                position_mode=str(policy["position_mode"]),
+                require_all_steps_agree=bool(policy["require_all_steps_agree"]),
+            )
+            report["locked_strategy"] = {
+                "note": (
+                    "Policy and threshold were selected on the held-out validation "
+                    "calibration tail before test evaluation."
+                ),
+                "policy": {
+                    key: value
+                    for key, value in policy.items()
+                    if key != "calibration_result"
+                },
+                "test_result": locked_result,
+            }
+            report["multi_candle_strategy"]["selection_warning"] = (
+                "Threshold sweeps below are exploratory test diagnostics only; use "
+                "locked_strategy as the preselected policy result."
+            )
     source_metadata.update(
         {
             "n_test_rows": len(predictions),
