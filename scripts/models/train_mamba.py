@@ -12,9 +12,9 @@ For a quick CPU smoke run:
 from __future__ import annotations
 
 import argparse
-import copy
 import hashlib
 import json
+import math
 import random
 import sys
 from dataclasses import asdict, dataclass
@@ -39,7 +39,10 @@ from scripts.models.mamba_data import (
     with_history,
 )
 from scripts.models.mamba_model import MambaForecaster
-from scripts.models.mamba_strategy import select_threshold
+from scripts.models.mamba_strategy import (
+    multi_period_strategy_metrics,
+    select_threshold,
+)
 from scripts.models.metrics import compute_all
 
 
@@ -51,6 +54,28 @@ class ModelOptions:
     expand: int
     conv_kernel: int
     dropout: float
+
+
+@dataclass(frozen=True)
+class CheckpointSelectionOptions:
+    metric: str
+    mae_tolerance: float
+    fixed_threshold_bps: float
+    minimum_trades: int
+    transaction_cost_bps: float
+    periods_per_year: int
+    position_mode: str
+    require_all_steps_agree: bool
+
+
+@dataclass
+class TrainingOutcome:
+    model: nn.Module
+    selected_epoch: int
+    best_mae: float | None
+    selected_metrics: dict[str, float | int | str | None] | None
+    epoch_metrics: list[dict[str, float | int | None]]
+    selection_reason: str
 
 
 def seed_everything(seed: int) -> None:
@@ -144,16 +169,205 @@ class ForecastLoss(nn.Module):
 
 
 @torch.no_grad()
-def cumulative_mae(
+def validation_diagnostics(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
     scaler: ZScoreScaler,
+    selection: CheckpointSelectionOptions,
+) -> dict[str, float | int | None]:
+    predicted_norm, actual_norm = predict(model, loader, device)
+    predicted_steps = scaler.inverse_target(predicted_norm)
+    actual_steps = scaler.inverse_target(actual_norm)
+    predicted = compound_horizon(predicted_steps)
+    actual = compound_horizon(actual_steps)
+    mae = float(np.mean(np.abs(predicted - actual)))
+    correlation = None
+    if np.std(predicted) > 0 and np.std(actual) > 0:
+        correlation = float(np.corrcoef(actual, predicted)[0, 1])
+    directional_accuracy = float(np.mean(np.sign(actual) == np.sign(predicted)))
+    positive_rate = float(np.mean(actual > 0))
+    negative_rate = float(np.mean(actual < 0))
+    majority_accuracy = max(positive_rate, negative_rate)
+
+    diagnostics: dict[str, float | int | None] = {
+        "cumulative_val_mae": mae,
+        "correlation": correlation,
+        "directional_accuracy": directional_accuracy,
+        "directional_edge": directional_accuracy - majority_accuracy,
+        "prediction_std": float(np.std(predicted)),
+        "actual_std": float(np.std(actual)),
+        "fixed_strategy_net_return": None,
+        "fixed_strategy_sharpe": None,
+        "fixed_strategy_trades": 0,
+    }
+    if np.asarray(actual_steps).ndim == 2 and actual_steps.shape[1] > 1:
+        strategy = multi_period_strategy_metrics(
+            actual_steps,
+            predicted_steps,
+            threshold_bps=selection.fixed_threshold_bps,
+            transaction_cost_bps=selection.transaction_cost_bps,
+            periods_per_year=selection.periods_per_year,
+            position_mode=selection.position_mode,
+            require_all_steps_agree=selection.require_all_steps_agree,
+        )
+        diagnostics.update(
+            {
+                "fixed_strategy_net_return": float(
+                    strategy["net_compounded_return"]
+                ),
+                "fixed_strategy_sharpe": (
+                    None
+                    if strategy["annualized_net_sharpe"] is None
+                    else float(strategy["annualized_net_sharpe"])
+                ),
+                "fixed_strategy_trades": int(strategy["trades"]),
+            }
+        )
+    return diagnostics
+
+
+def choose_epoch_metrics(
+    epoch_metrics: list[dict[str, float | int | None]],
+    selection: CheckpointSelectionOptions,
+) -> tuple[dict[str, float | int | None], str]:
+    """Choose a profitable/informative checkpoint inside a near-best MAE set."""
+    if not epoch_metrics:
+        raise ValueError("epoch_metrics must not be empty")
+    best_mae = min(float(row["cumulative_val_mae"]) for row in epoch_metrics)
+    near_best = [
+        row
+        for row in epoch_metrics
+        if float(row["cumulative_val_mae"])
+        <= best_mae * (1.0 + selection.mae_tolerance)
+    ]
+    positive_correlation = [
+        row
+        for row in near_best
+        if row["correlation"] is not None and float(row["correlation"]) > 0
+    ]
+
+    if selection.metric == "fixed_strategy_net_return":
+        eligible = [
+            row
+            for row in positive_correlation
+            if row["fixed_strategy_net_return"] is not None
+            and int(row["fixed_strategy_trades"]) >= selection.minimum_trades
+        ]
+        if eligible:
+            best_return = max(
+                float(row["fixed_strategy_net_return"]) for row in eligible
+            )
+            return_tied = [
+                row
+                for row in eligible
+                if np.isclose(
+                    float(row["fixed_strategy_net_return"]),
+                    best_return,
+                    rtol=0.0,
+                    atol=1e-12,
+                )
+            ]
+            return (
+                max(
+                    return_tied,
+                    key=lambda row: (
+                        float(row["correlation"]),
+                        int(row["epoch"]),
+                    ),
+                ),
+                "near_best_mae_then_fixed_strategy_net_return_then_correlation",
+            )
+    elif selection.metric == "correlation" and positive_correlation:
+        return (
+            max(positive_correlation, key=lambda row: float(row["correlation"])),
+            "near_best_mae_then_correlation",
+        )
+
+    if positive_correlation:
+        return (
+            max(positive_correlation, key=lambda row: float(row["correlation"])),
+            "fallback_near_best_mae_then_correlation",
+        )
+    return (
+        min(near_best, key=lambda row: float(row["cumulative_val_mae"])),
+        "fallback_best_mae",
+    )
+
+
+def choose_lookback_result(
+    tuning_results: list[dict[str, object]],
+    selection: CheckpointSelectionOptions,
+    score_tolerance: float,
+) -> tuple[dict[str, object], str]:
+    """Choose the shortest lookback among near-tied profitable candidates."""
+    if not tuning_results:
+        raise ValueError("tuning_results must not be empty")
+    if score_tolerance < 0:
+        raise ValueError("score_tolerance must be non-negative")
+    global_best_mae = min(
+        float(row["best_cumulative_val_mae"]) for row in tuning_results
+    )
+    near_best = [
+        row
+        for row in tuning_results
+        if float(row["selected_cumulative_val_mae"])
+        <= global_best_mae * (1.0 + selection.mae_tolerance)
+    ]
+    eligible = [
+        row
+        for row in near_best
+        if row["selected_correlation"] is not None
+        and float(row["selected_correlation"]) > 0
+    ]
+    score_key = "selected_correlation"
+    if selection.metric == "fixed_strategy_net_return":
+        score_key = "selected_fixed_strategy_net_return"
+        eligible = [
+            row
+            for row in eligible
+            if row[score_key] is not None
+            and int(row["selected_fixed_strategy_trades"])
+            >= selection.minimum_trades
+        ]
+
+    if eligible:
+        best_score = max(float(row[score_key]) for row in eligible)
+        tied = [
+            row
+            for row in eligible
+            if float(row[score_key]) >= best_score - score_tolerance
+        ]
+        return min(tied, key=lambda row: int(row["lookback"])), (
+            f"near_best_mae_then_{selection.metric}_with_shorter_tie_break"
+        )
+
+    mae_tied = [
+        row
+        for row in tuning_results
+        if float(row["best_cumulative_val_mae"])
+        <= global_best_mae * (1.0 + selection.mae_tolerance)
+    ]
+    return min(mae_tied, key=lambda row: int(row["lookback"])), (
+        "fallback_near_best_mae_then_shortest_lookback"
+    )
+
+
+def cosine_warmup_multiplier(
+    step: int, total_steps: int, warmup_steps: int
 ) -> float:
-    predictions, targets = predict(model, loader, device)
-    predicted = compound_horizon(scaler.inverse_target(predictions))
-    actual = compound_horizon(scaler.inverse_target(targets))
-    return float(np.mean(np.abs(predicted - actual)))
+    if warmup_steps > 0 and step < warmup_steps:
+        return float(step + 1) / float(warmup_steps)
+    decay_steps = max(1, total_steps - warmup_steps)
+    progress = min(1.0, max(0.0, (step - warmup_steps) / decay_steps))
+    return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+
+def state_dict_to_cpu(model: nn.Module) -> dict[str, torch.Tensor]:
+    return {
+        name: value.detach().cpu().clone()
+        for name, value in model.state_dict().items()
+    }
 
 
 def train_model(
@@ -167,13 +381,25 @@ def train_model(
     forecast_horizon: int,
     cumulative_loss_weight: float,
     direction_loss_weight: float,
+    selection_options: CheckpointSelectionOptions | None = None,
+    warmup_epochs: int = 0,
+    scheduler_epochs: int | None = None,
     val_loader: DataLoader | None = None,
     patience: int = 5,
-) -> tuple[nn.Module, int, float | None]:
-    """Train with optional early stopping and restore the best validation state."""
+) -> TrainingOutcome:
+    """Train and restore a checkpoint selected inside a near-best MAE set."""
     model.to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
+    )
+    planned_epochs = epochs if scheduler_epochs is None else scheduler_epochs
+    total_steps = max(1, planned_epochs * len(train_loader))
+    warmup_steps = max(0, warmup_epochs * len(train_loader))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lambda step: cosine_warmup_multiplier(
+            step, total_steps=total_steps, warmup_steps=warmup_steps
+        ),
     )
     loss_fn = ForecastLoss(
         target_mean=float(scaler.mean[TARGET_INDEX]),
@@ -182,10 +408,10 @@ def train_model(
         cumulative_weight=cumulative_loss_weight,
         direction_weight=direction_loss_weight,
     )
-    best_state: dict[str, torch.Tensor] | None = None
-    best_epoch = epochs
-    best_score = float("inf")
+    best_mae = float("inf")
     stale_epochs = 0
+    metrics_history: list[dict[str, float | int | None]] = []
+    epoch_states: dict[int, dict[str, torch.Tensor]] = {}
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -200,17 +426,48 @@ def train_model(
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()
             total_loss += loss.item() * len(target)
             total_rows += len(target)
 
-        message = f"epoch {epoch:03d} train_loss={total_loss / total_rows:.6f}"
+        train_loss = total_loss / total_rows
+        current_lr = float(optimizer.param_groups[0]["lr"])
+        message = (
+            f"epoch {epoch:03d} train_loss={train_loss:.6f} "
+            f"lr={current_lr:.2e}"
+        )
         if val_loader is not None:
-            score = cumulative_mae(model, val_loader, device, scaler)
-            message += f" cumulative_val_mae={score:.6f}"
-            if score < best_score - 1e-7:
-                best_score = score
-                best_epoch = epoch
-                best_state = copy.deepcopy(model.state_dict())
+            if selection_options is None:
+                raise ValueError("selection_options are required with val_loader")
+            diagnostics = validation_diagnostics(
+                model, val_loader, device, scaler, selection_options
+            )
+            diagnostics.update(
+                {
+                    "epoch": epoch,
+                    "train_loss": train_loss,
+                    "learning_rate": current_lr,
+                }
+            )
+            metrics_history.append(diagnostics)
+            epoch_states[epoch] = state_dict_to_cpu(model)
+            score = float(diagnostics["cumulative_val_mae"])
+            correlation = diagnostics["correlation"]
+            strategy_return = diagnostics["fixed_strategy_net_return"]
+            message += (
+                f" cumulative_val_mae={score:.6f}"
+                f" val_corr={float(correlation):.4f}"
+                if correlation is not None
+                else f" cumulative_val_mae={score:.6f} val_corr=None"
+            )
+            message += (
+                f" fixed_net={float(strategy_return):.4f}"
+                f" fixed_trades={int(diagnostics['fixed_strategy_trades'])}"
+                if strategy_return is not None
+                else " fixed_net=None fixed_trades=0"
+            )
+            if score < best_mae - 1e-7:
+                best_mae = score
                 stale_epochs = 0
             else:
                 stale_epochs += 1
@@ -220,9 +477,30 @@ def train_model(
             print(f"early stopping after epoch {epoch}", flush=True)
             break
 
-    if best_state is not None:
-        model.load_state_dict(best_state)
-    return model, best_epoch, None if val_loader is None else best_score
+    if val_loader is None:
+        return TrainingOutcome(
+            model=model,
+            selected_epoch=epochs,
+            best_mae=None,
+            selected_metrics=None,
+            epoch_metrics=[],
+            selection_reason="final_fit_without_validation",
+        )
+
+    assert selection_options is not None
+    selected_metrics, reason = choose_epoch_metrics(
+        metrics_history, selection_options
+    )
+    selected_epoch = int(selected_metrics["epoch"])
+    model.load_state_dict(epoch_states[selected_epoch], strict=True)
+    return TrainingOutcome(
+        model=model,
+        selected_epoch=selected_epoch,
+        best_mae=best_mae,
+        selected_metrics={**selected_metrics, "selection_reason": reason},
+        epoch_metrics=metrics_history,
+        selection_reason=reason,
+    )
 
 
 def limit_rows(
@@ -325,17 +603,18 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="Number of future hourly returns predicted together (default: 3).",
     )
-    parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--d-model", type=int, default=64)
+    parser.add_argument("--epochs", type=int, default=40)
+    parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-3)
+    parser.add_argument("--warmup-epochs", type=int, default=2)
+    parser.add_argument("--d-model", type=int, default=32)
     parser.add_argument("--state-size", type=int, default=16)
-    parser.add_argument("--layers", type=int, default=3)
+    parser.add_argument("--layers", type=int, default=2)
     parser.add_argument("--expand", type=int, default=2)
     parser.add_argument("--conv-kernel", type=int, default=4)
-    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--cumulative-loss-weight", type=float, default=1.0)
     parser.add_argument("--direction-loss-weight", type=float, default=0.0)
     parser.add_argument(
@@ -372,6 +651,31 @@ def parse_args() -> argparse.Namespace:
         ),
         default="annualized_net_sharpe",
     )
+    parser.add_argument(
+        "--checkpoint-selection-metric",
+        choices=("correlation", "fixed_strategy_net_return"),
+        default="fixed_strategy_net_return",
+        help="Select an epoch/lookback inside the near-best-MAE candidate set.",
+    )
+    parser.add_argument(
+        "--checkpoint-mae-tolerance",
+        type=float,
+        default=0.01,
+        help="Relative MAE tolerance defining acceptable epoch/lookback candidates.",
+    )
+    parser.add_argument(
+        "--checkpoint-fixed-threshold-bps",
+        type=float,
+        default=2.0,
+        help="Fixed pre-calibration threshold used only for checkpoint comparison.",
+    )
+    parser.add_argument("--checkpoint-min-trades", type=int, default=30)
+    parser.add_argument(
+        "--lookback-score-tolerance",
+        type=float,
+        default=0.005,
+        help="Absolute selection-score difference treated as a lookback tie.",
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit-train", type=int, default=None)
@@ -384,6 +688,8 @@ def main() -> None:
     args = parse_args()
     if args.epochs < 1 or args.batch_size < 1:
         raise ValueError("epochs and batch size must be positive")
+    if args.warmup_epochs < 0:
+        raise ValueError("warmup-epochs must be non-negative")
     if any(lookback < 1 for lookback in args.lookbacks):
         raise ValueError("lookbacks must be positive")
     if args.forecast_horizon < 1:
@@ -398,6 +704,12 @@ def main() -> None:
         raise ValueError("strategy cost must be non-negative and periods positive")
     if args.strategy_min_calibration_trades < 1:
         raise ValueError("strategy-min-calibration-trades must be positive")
+    if args.checkpoint_min_trades < 1:
+        raise ValueError("checkpoint-min-trades must be positive")
+    if args.checkpoint_mae_tolerance < 0 or args.lookback_score_tolerance < 0:
+        raise ValueError("checkpoint/lookback tolerances must be non-negative")
+    if args.checkpoint_fixed_threshold_bps < 0:
+        raise ValueError("checkpoint fixed threshold must be non-negative")
 
     seed_everything(args.seed)
     device = resolve_device(args.device)
@@ -408,6 +720,16 @@ def main() -> None:
         expand=args.expand,
         conv_kernel=args.conv_kernel,
         dropout=args.dropout,
+    )
+    checkpoint_selection = CheckpointSelectionOptions(
+        metric=args.checkpoint_selection_metric,
+        mae_tolerance=args.checkpoint_mae_tolerance,
+        fixed_threshold_bps=args.checkpoint_fixed_threshold_bps,
+        minimum_trades=args.checkpoint_min_trades,
+        transaction_cost_bps=args.transaction_cost_bps,
+        periods_per_year=args.periods_per_year,
+        position_mode=args.strategy_position_mode,
+        require_all_steps_agree=args.strategy_require_all_steps_agree,
     )
 
     train_frame, train_values = load_split(args.train)
@@ -440,8 +762,7 @@ def main() -> None:
     )
 
     tuning_scaler = ZScoreScaler.fit(train_values)
-    tuning_results: list[dict[str, float | int]] = []
-    best: dict[str, object] | None = None
+    tuning_results: list[dict[str, object]] = []
 
     for lookback in args.lookbacks:
         print(f"\nTuning lookback={lookback}", flush=True)
@@ -454,7 +775,7 @@ def main() -> None:
             args.batch_size,
             args.forecast_horizon,
         )
-        model, best_epoch, score = train_model(
+        outcome = train_model(
             make_model(options, args.forecast_horizon),
             train_loader,
             device,
@@ -465,30 +786,57 @@ def main() -> None:
             args.forecast_horizon,
             args.cumulative_loss_weight,
             args.direction_loss_weight,
+            selection_options=checkpoint_selection,
+            warmup_epochs=args.warmup_epochs,
+            scheduler_epochs=args.epochs,
             val_loader=val_loader,
             patience=args.patience,
         )
-        assert score is not None
-        cumulative_val_mae = score
+        assert outcome.best_mae is not None
+        assert outcome.selected_metrics is not None
+        selected = outcome.selected_metrics
         result = {
             "lookback": lookback,
-            "best_epoch": best_epoch,
-            "cumulative_horizon_val_mae": cumulative_val_mae,
+            "selected_epoch": outcome.selected_epoch,
+            "best_cumulative_val_mae": outcome.best_mae,
+            "selected_cumulative_val_mae": float(
+                selected["cumulative_val_mae"]
+            ),
+            "selected_correlation": selected["correlation"],
+            "selected_directional_edge": selected["directional_edge"],
+            "selected_fixed_strategy_net_return": selected[
+                "fixed_strategy_net_return"
+            ],
+            "selected_fixed_strategy_sharpe": selected["fixed_strategy_sharpe"],
+            "selected_fixed_strategy_trades": selected["fixed_strategy_trades"],
+            "checkpoint_selection_reason": outcome.selection_reason,
+            "epoch_metrics": outcome.epoch_metrics,
         }
         tuning_results.append(result)
-        if best is None or cumulative_val_mae < best["selection_score"]:
-            best = {
-                "lookback": lookback,
-                "epoch": best_epoch,
-                "selection_score": cumulative_val_mae,
-            }
+        print(
+            "Selected checkpoint "
+            f"epoch={outcome.selected_epoch} "
+            f"mae={float(selected['cumulative_val_mae']):.6f} "
+            f"corr={selected['correlation']} "
+            f"fixed_net={selected['fixed_strategy_net_return']} "
+            f"reason={outcome.selection_reason}",
+            flush=True,
+        )
 
-    assert best is not None
+    best, lookback_reason = choose_lookback_result(
+        tuning_results,
+        checkpoint_selection,
+        score_tolerance=args.lookback_score_tolerance,
+    )
     best_lookback = int(best["lookback"])
-    final_epochs = int(best["epoch"])
+    final_epochs = int(best["selected_epoch"])
     print(
         f"\nSelected lookback={best_lookback}, epochs={final_epochs}, "
-        f"cumulative_horizon_val_mae={best['selection_score']:.6f}"
+        f"cumulative_horizon_val_mae="
+        f"{float(best['selected_cumulative_val_mae']):.6f}, "
+        f"correlation={best['selected_correlation']}, "
+        f"fixed_net={best['selected_fixed_strategy_net_return']}, "
+        f"reason={lookback_reason}"
     )
 
     fit_values = np.concatenate([train_values, selection_values], axis=0)
@@ -503,7 +851,7 @@ def main() -> None:
         final_train_set, batch_size=args.batch_size, shuffle=True
     )
     seed_everything(args.seed)
-    final_model, _, _ = train_model(
+    final_outcome = train_model(
         make_model(options, args.forecast_horizon),
         final_loader,
         device,
@@ -514,7 +862,10 @@ def main() -> None:
         args.forecast_horizon,
         args.cumulative_loss_weight,
         args.direction_loss_weight,
+        warmup_epochs=args.warmup_epochs,
+        scheduler_epochs=args.epochs,
     )
+    final_model = final_outcome.model
 
     calibration_scaled = final_scaler.transform(calibration_values)
     calibration_set = with_history(
@@ -626,7 +977,11 @@ def main() -> None:
                     "direction_loss_weight": args.direction_loss_weight,
                     "learning_rate": args.learning_rate,
                     "weight_decay": args.weight_decay,
+                    "warmup_epochs": args.warmup_epochs,
                     "batch_size": args.batch_size,
+                    "checkpoint_selection": asdict(checkpoint_selection),
+                    "lookback_score_tolerance": args.lookback_score_tolerance,
+                    "lookback_selection_reason": lookback_reason,
                     "calibration_fraction": args.calibration_fraction,
                     "row_limits": {
                         "train": args.limit_train,

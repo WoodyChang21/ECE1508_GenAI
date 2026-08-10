@@ -256,11 +256,13 @@ pip install -r requirements-model.txt
 python scripts/models/train_mamba.py
 ```
 
-The default run predicts three future hourly returns together and tunes lookbacks `[24, 60, 120]` on the validation MAE of the compounded three-candle return. Raw price levels are converted into relative candle and indicator distances; VIXY's drifting level is omitted in favor of its return; and bar-time/day-of-week cycles are included. The default training loss combines per-step Huber loss and compounded-horizon loss. Direction loss remains available through `--direction-loss-weight`, but defaults to zero after it failed to improve out-of-sample correlation.
+The default run predicts three future hourly returns together and tunes lookbacks `[24, 60, 120]`. Raw price levels are converted into relative candle and indicator distances; VIXY's drifting level is omitted in favor of its return; and bar-time/day-of-week cycles are included. The default training loss combines per-step Huber loss and compounded-horizon loss. Direction loss remains available through `--direction-loss-weight`, but defaults to zero after it failed to improve out-of-sample correlation. The regularized default architecture uses two 32-wide Mamba blocks, 0.2 dropout, AdamW at `1e-4`, and a two-epoch warmup followed by cosine decay.
+
+Checkpoint selection no longer treats the single lowest compounded-return MAE as sufficient. For each lookback, epochs within 1% of the best MAE form a quality set; among checkpoints with positive correlation and at least 30 trades, the default selector maximizes net return from one fixed, predeclared 2 bp long/cash all-steps-positive rule. Lookbacks use the same MAE gate and signal checks, with the shorter lookback winning when net returns differ by no more than 0.005. If no checkpoint clears the signal requirements, selection falls back to correlation and then MAE. This can be switched to correlation-only selection with `--checkpoint-selection-metric correlation`.
 
 The first 70% of validation is used for model selection and is included in the final fit. The chronological final 30% remains completely outside model fitting and is used only for residual-interval calibration and selection of one deployment threshold after transaction costs. That locked policy is stored in the checkpoint. The test target is never used for fitting, calibration, or strategy selection.
 
-Threshold selection defaults to annualized net Sharpe. A profit-oriented experiment can instead pass `--strategy-selection-metric net_compounded_return`; the Colab v3 notebook does this while requiring at least 30 calibration trades. This deliberately favors raw return and may increase exposure and drawdown.
+The fixed 2 bp policy above is only a consistent ruler for comparing checkpoints on the selection segment; it does not choose the deployed threshold. On the untouched calibration tail, threshold selection defaults to annualized net Sharpe. A profit-oriented experiment can instead pass `--strategy-selection-metric net_compounded_return`; the Colab v4 notebook does this while requiring at least 30 calibration trades. This deliberately favors raw return and may increase exposure and drawdown.
 
 The output retains the comparison schema (`datetime`, `y`, `pred`, interval bounds, and `model`), where `y` and `pred` are compounded horizon returns. It also includes `y_h1`...`y_h3` and `pred_h1`...`pred_h3`, plus the horizon end time. Intervals are formed from validation residual quantiles of the compounded return.
 
@@ -299,7 +301,7 @@ python scripts/models/evaluate_mamba.py \
   --transaction-cost-bps 1
 ```
 
-Both modes write a full report to `data/predictions/mamba_eval.json`; checkpoint mode also writes fresh forecasts to `data/predictions/mamba_eval.parquet`. For a three-step v2 checkpoint, `locked_strategy` is the primary strategy result because its rule and threshold were selected on the held-out validation calibration tail. Test-set threshold sweeps remain available but are explicitly labeled exploratory. Because the 2024–2025 test results informed the v2 design, a later unseen period or walk-forward replay is still required for a genuinely pristine performance claim. Positions are held for exactly three candles, only one position may be open, and entry and exit costs are charged.
+Both modes write a full report to `data/predictions/mamba_eval.json`; checkpoint mode also writes fresh forecasts to `data/predictions/mamba_eval.parquet`. For a three-step checkpoint, `locked_strategy` is the primary strategy result because its rule and threshold were selected on the held-out validation calibration tail. Test-set threshold sweeps remain available but are explicitly labeled exploratory. Because the 2024-2025 test results informed the redesign, a later unseen period or walk-forward replay is still required for a genuinely pristine performance claim. Positions are held for exactly three candles, only one position may be open, and entry and exit costs are charged.
 
 The evaluator checks the saved feature schema version and order, model settings, scaler, lookback, forecast horizon, and SHA-256 hashes of the validation/test files. This prevents accidentally evaluating a checkpoint against different data. Feature-schema v1 checkpoints must be evaluated with their original checkout; v2 intentionally rejects them because the model inputs changed.
 
@@ -307,7 +309,6 @@ The evaluator checks the saved feature schema version and order, model settings,
 
 ```bash
 pytest tests/ -v
-# Expected: 44 passed
 ```
 
 ---
