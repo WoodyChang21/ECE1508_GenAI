@@ -256,9 +256,11 @@ pip install -r requirements-model.txt
 python scripts/models/train_mamba.py
 ```
 
-The default run predicts three future hourly returns together and tunes lookbacks `[24, 60, 120]` on the validation MAE of the compounded three-candle return. Raw price levels are converted into relative candle and indicator distances; VIXY's drifting level is omitted in favor of its return; and bar-time/day-of-week cycles are included. The training loss combines per-step Huber loss, compounded-horizon loss, and a lightly weighted horizon-direction loss.
+The default run predicts three future hourly returns together and tunes lookbacks `[24, 60, 120]` on the validation MAE of the compounded three-candle return. Raw price levels are converted into relative candle and indicator distances; VIXY's drifting level is omitted in favor of its return; and bar-time/day-of-week cycles are included. The default training loss combines per-step Huber loss and compounded-horizon loss. Direction loss remains available through `--direction-loss-weight`, but defaults to zero after it failed to improve out-of-sample correlation.
 
 The first 70% of validation is used for model selection and is included in the final fit. The chronological final 30% remains completely outside model fitting and is used only for residual-interval calibration and selection of one deployment threshold after transaction costs. That locked policy is stored in the checkpoint. The test target is never used for fitting, calibration, or strategy selection.
+
+Threshold selection defaults to annualized net Sharpe. A profit-oriented experiment can instead pass `--strategy-selection-metric net_compounded_return`; the Colab v3 notebook does this while requiring at least 30 calibration trades. This deliberately favors raw return and may increase exposure and drawdown.
 
 The output retains the comparison schema (`datetime`, `y`, `pred`, interval bounds, and `model`), where `y` and `pred` are compounded horizon returns. It also includes `y_h1`...`y_h3` and `pred_h1`...`pred_h3`, plus the horizon end time. Intervals are formed from validation residual quantiles of the compounded return.
 

@@ -337,7 +337,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conv-kernel", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--cumulative-loss-weight", type=float, default=1.0)
-    parser.add_argument("--direction-loss-weight", type=float, default=0.05)
+    parser.add_argument("--direction-loss-weight", type=float, default=0.0)
     parser.add_argument(
         "--calibration-fraction",
         type=float,
@@ -363,6 +363,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--transaction-cost-bps", type=float, default=1.0)
     parser.add_argument("--periods-per-year", type=int, default=1764)
     parser.add_argument("--strategy-min-calibration-trades", type=int, default=30)
+    parser.add_argument(
+        "--strategy-selection-metric",
+        choices=(
+            "annualized_net_sharpe",
+            "net_compounded_return",
+            "mean_net_trade_return",
+        ),
+        default="annualized_net_sharpe",
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit-train", type=int, default=None)
@@ -537,6 +546,7 @@ def main() -> None:
             position_mode=args.strategy_position_mode,
             require_all_steps_agree=args.strategy_require_all_steps_agree,
             minimum_trades=args.strategy_min_calibration_trades,
+            selection_metric=args.strategy_selection_metric,
         )
 
     full_history_values = np.concatenate([fit_values, calibration_values], axis=0)

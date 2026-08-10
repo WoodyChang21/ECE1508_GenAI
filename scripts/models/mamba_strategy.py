@@ -141,12 +141,22 @@ def select_threshold(
     position_mode: str,
     require_all_steps_agree: bool,
     minimum_trades: int = 1,
+    selection_metric: str = "annualized_net_sharpe",
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
-    """Select one threshold by net Sharpe on pre-test calibration data."""
+    """Select one threshold on pre-test calibration data."""
     if not thresholds_bps:
         raise ValueError("at least one strategy threshold is required")
     if minimum_trades < 1:
         raise ValueError("minimum_trades must be positive")
+    allowed_metrics = {
+        "annualized_net_sharpe",
+        "net_compounded_return",
+        "mean_net_trade_return",
+    }
+    if selection_metric not in allowed_metrics:
+        raise ValueError(
+            f"selection_metric must be one of {sorted(allowed_metrics)}"
+        )
     results = [
         multi_period_strategy_metrics(
             y_true_steps,
@@ -162,22 +172,22 @@ def select_threshold(
     eligible = [
         row
         for row in results
-        if row["annualized_net_sharpe"] is not None
+        if row[selection_metric] is not None
         and int(row["trades"]) >= minimum_trades
     ]
     if eligible:
-        best = max(eligible, key=lambda row: float(row["annualized_net_sharpe"]))
-        selection_metric = "annualized_net_sharpe"
+        best = max(eligible, key=lambda row: float(row[selection_metric]))
+        recorded_selection_metric = selection_metric
     else:
         best = max(results, key=lambda row: int(row["trades"]))
-        selection_metric = "fallback_most_trades"
+        recorded_selection_metric = "fallback_most_trades"
     policy: dict[str, object] = {
         "position_mode": position_mode,
         "require_all_steps_agree": require_all_steps_agree,
         "threshold_bps": float(best["threshold_bps"]),
         "transaction_cost_bps": float(transaction_cost_bps),
         "periods_per_year": int(periods_per_year),
-        "selection_metric": selection_metric,
+        "selection_metric": recorded_selection_metric,
         "minimum_calibration_trades": minimum_trades,
         "calibration_result": best,
     }
