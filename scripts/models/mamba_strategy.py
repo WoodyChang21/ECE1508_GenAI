@@ -1,4 +1,4 @@
-"""Chronological fixed-horizon strategy helpers shared by training and evaluation."""
+"""Chronological strategy helpers shared by training and evaluation."""
 
 from __future__ import annotations
 
@@ -132,6 +132,114 @@ def multi_period_strategy_metrics(
     }
 
 
+def persistent_long_strategy_metrics(
+    y_true_steps: np.ndarray,
+    y_pred_steps: np.ndarray,
+    entry_threshold_bps: float,
+    exit_threshold_bps: float,
+    transaction_cost_bps: float,
+    periods_per_year: int,
+) -> dict[str, float | int | str | None]:
+    """Backtest a receding-horizon long/cash policy without overlapping returns.
+
+    At each candle, the compounded multi-step forecast determines the position for
+    the next realized candle. A long position persists until the forecast falls to
+    the exit threshold, so an unchanged signal does not create another round trip.
+    """
+    y_true_steps = np.asarray(y_true_steps, dtype=np.float64)
+    y_pred_steps = np.asarray(y_pred_steps, dtype=np.float64)
+    if (
+        y_true_steps.shape != y_pred_steps.shape
+        or y_true_steps.ndim != 2
+        or y_true_steps.shape[0] == 0
+        or y_true_steps.shape[1] < 2
+    ):
+        raise ValueError("step targets/predictions must be equal non-empty 2D arrays")
+    if entry_threshold_bps < 0 or exit_threshold_bps < 0:
+        raise ValueError("entry and exit thresholds must be non-negative")
+    if exit_threshold_bps > entry_threshold_bps:
+        raise ValueError("exit threshold must not exceed entry threshold")
+    if transaction_cost_bps < 0:
+        raise ValueError("transaction costs must be non-negative")
+    if periods_per_year < 1:
+        raise ValueError("periods_per_year must be positive")
+
+    predicted_cumulative = np.prod(1.0 + y_pred_steps, axis=1) - 1.0
+    actual_next = y_true_steps[:, 0]
+    entry_threshold = entry_threshold_bps / 10_000.0
+    exit_threshold = exit_threshold_bps / 10_000.0
+    one_way_cost = transaction_cost_bps / 10_000.0
+    positions = np.zeros(len(actual_next), dtype=np.float64)
+    costs = np.zeros(len(actual_next), dtype=np.float64)
+    turnover = np.zeros(len(actual_next), dtype=np.float64)
+    trade_bounds: list[tuple[int, int]] = []
+    position = 0.0
+    trade_start: int | None = None
+
+    for index, signal in enumerate(predicted_cumulative):
+        next_position = position
+        if position == 0.0 and signal >= entry_threshold:
+            next_position = 1.0
+            trade_start = index
+        elif position == 1.0 and signal <= exit_threshold:
+            next_position = 0.0
+
+        change = abs(next_position - position)
+        turnover[index] = change
+        costs[index] = change * one_way_cost
+        positions[index] = next_position
+        if position == 1.0 and next_position == 0.0:
+            assert trade_start is not None
+            trade_bounds.append((trade_start, index + 1))
+            trade_start = None
+        position = next_position
+
+    if position == 1.0:
+        costs[-1] += one_way_cost
+        turnover[-1] += 1.0
+        assert trade_start is not None
+        trade_bounds.append((trade_start, len(actual_next)))
+
+    gross_returns = positions * actual_next
+    net_returns = gross_returns - costs
+    active = positions != 0.0
+    trade_returns = np.asarray(
+        [compounded_return(net_returns[start:end]) for start, end in trade_bounds],
+        dtype=np.float64,
+    )
+    net_std = float(np.std(net_returns))
+    sharpe = None
+    if net_std > 0:
+        sharpe = float(
+            np.mean(net_returns) / net_std * np.sqrt(float(periods_per_year))
+        )
+
+    return {
+        "position_mode": "long_only",
+        "forecast_horizon": int(y_true_steps.shape[1]),
+        "signal_rule": "persistent_cumulative_return_hysteresis",
+        "entry_threshold_bps": float(entry_threshold_bps),
+        "exit_threshold_bps": float(exit_threshold_bps),
+        "trades": len(trade_bounds),
+        "active_periods": int(active.sum()),
+        "exposure": float(active.mean()),
+        "position_turnover": float(turnover.sum()),
+        "directional_accuracy_when_active": (
+            float(np.mean(actual_next[active] > 0)) if active.any() else None
+        ),
+        "net_trade_win_rate": (
+            float(np.mean(trade_returns > 0)) if len(trade_returns) else None
+        ),
+        "mean_net_trade_return": (
+            float(np.mean(trade_returns)) if len(trade_returns) else None
+        ),
+        "gross_compounded_return": compounded_return(gross_returns),
+        "net_compounded_return": compounded_return(net_returns),
+        "annualized_net_sharpe": sharpe,
+        "net_max_drawdown": max_drawdown(net_returns),
+    }
+
+
 def select_threshold(
     y_true_steps: np.ndarray,
     y_pred_steps: np.ndarray,
@@ -185,6 +293,70 @@ def select_threshold(
         "position_mode": position_mode,
         "require_all_steps_agree": require_all_steps_agree,
         "threshold_bps": float(best["threshold_bps"]),
+        "transaction_cost_bps": float(transaction_cost_bps),
+        "periods_per_year": int(periods_per_year),
+        "selection_metric": recorded_selection_metric,
+        "minimum_calibration_trades": minimum_trades,
+        "calibration_result": best,
+    }
+    return policy, results
+
+
+def select_persistent_threshold(
+    y_true_steps: np.ndarray,
+    y_pred_steps: np.ndarray,
+    thresholds_bps: list[float],
+    exit_threshold_bps: float,
+    transaction_cost_bps: float,
+    periods_per_year: int,
+    minimum_trades: int = 1,
+    selection_metric: str = "annualized_net_sharpe",
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    """Select one persistent-policy entry threshold on calibration data."""
+    if not thresholds_bps:
+        raise ValueError("at least one strategy threshold is required")
+    if minimum_trades < 1:
+        raise ValueError("minimum_trades must be positive")
+    allowed_metrics = {
+        "annualized_net_sharpe",
+        "net_compounded_return",
+        "mean_net_trade_return",
+    }
+    if selection_metric not in allowed_metrics:
+        raise ValueError(
+            f"selection_metric must be one of {sorted(allowed_metrics)}"
+        )
+    results = [
+        persistent_long_strategy_metrics(
+            y_true_steps,
+            y_pred_steps,
+            entry_threshold_bps=threshold,
+            exit_threshold_bps=exit_threshold_bps,
+            transaction_cost_bps=transaction_cost_bps,
+            periods_per_year=periods_per_year,
+        )
+        for threshold in thresholds_bps
+        if threshold >= exit_threshold_bps
+    ]
+    if not results:
+        raise ValueError("at least one entry threshold must reach the exit threshold")
+    eligible = [
+        row
+        for row in results
+        if row[selection_metric] is not None
+        and int(row["trades"]) >= minimum_trades
+    ]
+    if eligible:
+        best = max(eligible, key=lambda row: float(row[selection_metric]))
+        recorded_selection_metric = selection_metric
+    else:
+        best = max(results, key=lambda row: int(row["trades"]))
+        recorded_selection_metric = "fallback_most_trades"
+    policy: dict[str, object] = {
+        "strategy_type": "persistent_long_cash",
+        "position_mode": "long_only",
+        "entry_threshold_bps": float(best["entry_threshold_bps"]),
+        "exit_threshold_bps": float(exit_threshold_bps),
         "transaction_cost_bps": float(transaction_cost_bps),
         "periods_per_year": int(periods_per_year),
         "selection_metric": recorded_selection_metric,

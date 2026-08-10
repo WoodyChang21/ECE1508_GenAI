@@ -41,6 +41,7 @@ from scripts.models.mamba_data import (
 from scripts.models.mamba_model import MambaForecaster
 from scripts.models.mamba_strategy import (
     multi_period_strategy_metrics,
+    select_persistent_threshold,
     select_threshold,
 )
 from scripts.models.metrics import compute_all
@@ -384,6 +385,7 @@ def train_model(
     selection_options: CheckpointSelectionOptions | None = None,
     warmup_epochs: int = 0,
     scheduler_epochs: int | None = None,
+    learning_rate_schedule: str = "cosine",
     val_loader: DataLoader | None = None,
     patience: int = 5,
 ) -> TrainingOutcome:
@@ -392,15 +394,19 @@ def train_model(
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
-    planned_epochs = epochs if scheduler_epochs is None else scheduler_epochs
-    total_steps = max(1, planned_epochs * len(train_loader))
-    warmup_steps = max(0, warmup_epochs * len(train_loader))
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer,
-        lr_lambda=lambda step: cosine_warmup_multiplier(
-            step, total_steps=total_steps, warmup_steps=warmup_steps
-        ),
-    )
+    if learning_rate_schedule not in {"constant", "cosine"}:
+        raise ValueError("learning_rate_schedule must be 'constant' or 'cosine'")
+    scheduler = None
+    if learning_rate_schedule == "cosine":
+        planned_epochs = epochs if scheduler_epochs is None else scheduler_epochs
+        total_steps = max(1, planned_epochs * len(train_loader))
+        warmup_steps = max(0, warmup_epochs * len(train_loader))
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer,
+            lr_lambda=lambda step: cosine_warmup_multiplier(
+                step, total_steps=total_steps, warmup_steps=warmup_steps
+            ),
+        )
     loss_fn = ForecastLoss(
         target_mean=float(scaler.mean[TARGET_INDEX]),
         target_scale=float(scaler.scale[TARGET_INDEX]),
@@ -426,7 +432,8 @@ def train_model(
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            scheduler.step()
+            if scheduler is not None:
+                scheduler.step()
             total_loss += loss.item() * len(target)
             total_rows += len(target)
 
@@ -609,6 +616,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-3)
     parser.add_argument("--warmup-epochs", type=int, default=2)
+    parser.add_argument(
+        "--learning-rate-schedule",
+        choices=("constant", "cosine"),
+        default="cosine",
+    )
     parser.add_argument("--d-model", type=int, default=32)
     parser.add_argument("--state-size", type=int, default=16)
     parser.add_argument("--layers", type=int, default=2)
@@ -629,6 +641,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=[2.0, 4.0, 6.0, 8.0, 10.0],
     )
+    parser.add_argument(
+        "--strategy-type",
+        choices=("fixed_horizon", "persistent_long_cash"),
+        default="fixed_horizon",
+    )
+    parser.add_argument("--strategy-exit-threshold-bps", type=float, default=0.0)
     parser.add_argument(
         "--strategy-position-mode",
         choices=("long_short", "long_only", "short_only"),
@@ -676,6 +694,12 @@ def parse_args() -> argparse.Namespace:
         default=0.005,
         help="Absolute selection-score difference treated as a lookback tie.",
     )
+    parser.add_argument(
+        "--refit-after-selection",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Refit on train+selection; disable to deploy the measured checkpoint.",
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit-train", type=int, default=None)
@@ -690,6 +714,8 @@ def main() -> None:
         raise ValueError("epochs and batch size must be positive")
     if args.warmup_epochs < 0:
         raise ValueError("warmup-epochs must be non-negative")
+    if args.learning_rate_schedule == "constant" and args.warmup_epochs != 0:
+        raise ValueError("constant learning rate requires --warmup-epochs 0")
     if any(lookback < 1 for lookback in args.lookbacks):
         raise ValueError("lookbacks must be positive")
     if args.forecast_horizon < 1:
@@ -700,6 +726,18 @@ def main() -> None:
         raise ValueError("loss weights must be non-negative")
     if any(value < 0 for value in args.strategy_thresholds_bps):
         raise ValueError("strategy thresholds must be non-negative")
+    if args.strategy_exit_threshold_bps < 0:
+        raise ValueError("strategy exit threshold must be non-negative")
+    if not any(
+        value >= args.strategy_exit_threshold_bps
+        for value in args.strategy_thresholds_bps
+    ):
+        raise ValueError("an entry threshold must reach the exit threshold")
+    if (
+        args.strategy_type == "persistent_long_cash"
+        and args.strategy_position_mode != "long_only"
+    ):
+        raise ValueError("persistent_long_cash requires long_only position mode")
     if args.transaction_cost_bps < 0 or args.periods_per_year < 1:
         raise ValueError("strategy cost must be non-negative and periods positive")
     if args.strategy_min_calibration_trades < 1:
@@ -763,6 +801,7 @@ def main() -> None:
 
     tuning_scaler = ZScoreScaler.fit(train_values)
     tuning_results: list[dict[str, object]] = []
+    selected_model_states: dict[int, dict[str, torch.Tensor]] = {}
 
     for lookback in args.lookbacks:
         print(f"\nTuning lookback={lookback}", flush=True)
@@ -789,6 +828,7 @@ def main() -> None:
             selection_options=checkpoint_selection,
             warmup_epochs=args.warmup_epochs,
             scheduler_epochs=args.epochs,
+            learning_rate_schedule=args.learning_rate_schedule,
             val_loader=val_loader,
             patience=args.patience,
         )
@@ -813,6 +853,7 @@ def main() -> None:
             "epoch_metrics": outcome.epoch_metrics,
         }
         tuning_results.append(result)
+        selected_model_states[lookback] = state_dict_to_cpu(outcome.model)
         print(
             "Selected checkpoint "
             f"epoch={outcome.selected_epoch} "
@@ -840,32 +881,42 @@ def main() -> None:
     )
 
     fit_values = np.concatenate([train_values, selection_values], axis=0)
-    final_scaler = ZScoreScaler.fit(fit_values)
-    fit_scaled = final_scaler.transform(fit_values)
-    final_train_set = WindowDataset(
-        fit_scaled,
-        lookback=best_lookback,
-        forecast_horizon=args.forecast_horizon,
-    )
-    final_loader = DataLoader(
-        final_train_set, batch_size=args.batch_size, shuffle=True
-    )
-    seed_everything(args.seed)
-    final_outcome = train_model(
-        make_model(options, args.forecast_horizon),
-        final_loader,
-        device,
-        final_epochs,
-        args.learning_rate,
-        args.weight_decay,
-        final_scaler,
-        args.forecast_horizon,
-        args.cumulative_loss_weight,
-        args.direction_loss_weight,
-        warmup_epochs=args.warmup_epochs,
-        scheduler_epochs=args.epochs,
-    )
-    final_model = final_outcome.model
+    if args.refit_after_selection:
+        final_scaler = ZScoreScaler.fit(fit_values)
+        fit_scaled = final_scaler.transform(fit_values)
+        final_train_set = WindowDataset(
+            fit_scaled,
+            lookback=best_lookback,
+            forecast_horizon=args.forecast_horizon,
+        )
+        final_loader = DataLoader(
+            final_train_set, batch_size=args.batch_size, shuffle=True
+        )
+        seed_everything(args.seed)
+        final_outcome = train_model(
+            make_model(options, args.forecast_horizon),
+            final_loader,
+            device,
+            final_epochs,
+            args.learning_rate,
+            args.weight_decay,
+            final_scaler,
+            args.forecast_horizon,
+            args.cumulative_loss_weight,
+            args.direction_loss_weight,
+            warmup_epochs=args.warmup_epochs,
+            scheduler_epochs=args.epochs,
+            learning_rate_schedule=args.learning_rate_schedule,
+        )
+        final_model = final_outcome.model
+    else:
+        final_scaler = tuning_scaler
+        fit_scaled = final_scaler.transform(fit_values)
+        final_model = make_model(options, args.forecast_horizon).to(device)
+        final_model.load_state_dict(
+            selected_model_states[best_lookback], strict=True
+        )
+        print("Using the exact validation-selected checkpoint without refitting.")
 
     calibration_scaled = final_scaler.transform(calibration_values)
     calibration_set = with_history(
@@ -888,17 +939,31 @@ def main() -> None:
     strategy_policy: dict[str, object] | None = None
     strategy_calibration_results: list[dict[str, object]] = []
     if args.forecast_horizon > 1:
-        strategy_policy, strategy_calibration_results = select_threshold(
-            calibration_true_steps,
-            calibration_pred_steps,
-            thresholds_bps=args.strategy_thresholds_bps,
-            transaction_cost_bps=args.transaction_cost_bps,
-            periods_per_year=args.periods_per_year,
-            position_mode=args.strategy_position_mode,
-            require_all_steps_agree=args.strategy_require_all_steps_agree,
-            minimum_trades=args.strategy_min_calibration_trades,
-            selection_metric=args.strategy_selection_metric,
-        )
+        if args.strategy_type == "persistent_long_cash":
+            strategy_policy, strategy_calibration_results = (
+                select_persistent_threshold(
+                    calibration_true_steps,
+                    calibration_pred_steps,
+                    thresholds_bps=args.strategy_thresholds_bps,
+                    exit_threshold_bps=args.strategy_exit_threshold_bps,
+                    transaction_cost_bps=args.transaction_cost_bps,
+                    periods_per_year=args.periods_per_year,
+                    minimum_trades=args.strategy_min_calibration_trades,
+                    selection_metric=args.strategy_selection_metric,
+                )
+            )
+        else:
+            strategy_policy, strategy_calibration_results = select_threshold(
+                calibration_true_steps,
+                calibration_pred_steps,
+                thresholds_bps=args.strategy_thresholds_bps,
+                transaction_cost_bps=args.transaction_cost_bps,
+                periods_per_year=args.periods_per_year,
+                position_mode=args.strategy_position_mode,
+                require_all_steps_agree=args.strategy_require_all_steps_agree,
+                minimum_trades=args.strategy_min_calibration_trades,
+                selection_metric=args.strategy_selection_metric,
+            )
 
     full_history_values = np.concatenate([fit_values, calibration_values], axis=0)
     full_history_scaled = final_scaler.transform(full_history_values)
@@ -978,7 +1043,10 @@ def main() -> None:
                     "learning_rate": args.learning_rate,
                     "weight_decay": args.weight_decay,
                     "warmup_epochs": args.warmup_epochs,
+                    "learning_rate_schedule": args.learning_rate_schedule,
                     "batch_size": args.batch_size,
+                    "refit_after_selection": args.refit_after_selection,
+                    "strategy_type": args.strategy_type,
                     "checkpoint_selection": asdict(checkpoint_selection),
                     "lookback_score_tolerance": args.lookback_score_tolerance,
                     "lookback_selection_reason": lookback_reason,

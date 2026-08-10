@@ -47,6 +47,7 @@ from scripts.models.mamba_strategy import (  # noqa: E402
     compounded_return as _compounded_return,
     max_drawdown as _max_drawdown,
     multi_period_strategy_metrics,
+    persistent_long_strategy_metrics,
     timeline_from_horizon_windows as _timeline_from_horizon_windows,
 )
 from scripts.models.train_mamba import (  # noqa: E402
@@ -485,6 +486,22 @@ def build_report(
                 periods_per_year,
             ),
         },
+        "persistent_long_cash_note": (
+            "The persistent policy recomputes the compounded horizon signal each "
+            "candle, earns only the next realized candle return, and carries an "
+            "unchanged long position without paying another round-trip cost."
+        ),
+        "persistent_long_cash_threshold_sweep": [
+            persistent_long_strategy_metrics(
+                y_true_steps,
+                y_pred_steps,
+                entry_threshold_bps=threshold,
+                exit_threshold_bps=0.0,
+                transaction_cost_bps=transaction_cost_bps,
+                periods_per_year=periods_per_year,
+            )
+            for threshold in thresholds_bps
+        ],
     }
     sweep_specs = {
         "threshold_sweep": ("long_short", False),
@@ -663,15 +680,27 @@ def main() -> None:
     if args.checkpoint and forecast_horizon > 1:
         policy = checkpoint.get("strategy_policy")
         if isinstance(policy, dict):
-            locked_result = multi_period_strategy_metrics(
-                y_true_steps,
-                y_pred_steps,
-                threshold_bps=float(policy["threshold_bps"]),
-                transaction_cost_bps=float(policy["transaction_cost_bps"]),
-                periods_per_year=int(policy["periods_per_year"]),
-                position_mode=str(policy["position_mode"]),
-                require_all_steps_agree=bool(policy["require_all_steps_agree"]),
-            )
+            if policy.get("strategy_type") == "persistent_long_cash":
+                locked_result = persistent_long_strategy_metrics(
+                    y_true_steps,
+                    y_pred_steps,
+                    entry_threshold_bps=float(policy["entry_threshold_bps"]),
+                    exit_threshold_bps=float(policy["exit_threshold_bps"]),
+                    transaction_cost_bps=float(policy["transaction_cost_bps"]),
+                    periods_per_year=int(policy["periods_per_year"]),
+                )
+            else:
+                locked_result = multi_period_strategy_metrics(
+                    y_true_steps,
+                    y_pred_steps,
+                    threshold_bps=float(policy["threshold_bps"]),
+                    transaction_cost_bps=float(policy["transaction_cost_bps"]),
+                    periods_per_year=int(policy["periods_per_year"]),
+                    position_mode=str(policy["position_mode"]),
+                    require_all_steps_agree=bool(
+                        policy["require_all_steps_agree"]
+                    ),
+                )
             report["locked_strategy"] = {
                 "note": (
                     "Policy and threshold were selected on the held-out validation "

@@ -246,6 +246,11 @@ def test_build_report_uses_non_overlapping_multi_candle_strategy():
     assert "sign_strategy" not in report
     assert "multi_candle_strategy" in report
     assert len(
+        report["multi_candle_strategy"][
+            "persistent_long_cash_threshold_sweep"
+        ]
+    ) == 1
+    assert len(
         report["multi_candle_strategy"]["all_steps_positive_threshold_sweep"]
     ) == 1
 
