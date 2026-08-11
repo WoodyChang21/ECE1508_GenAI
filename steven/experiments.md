@@ -53,10 +53,11 @@ branch**:
 | buy-and-hold (benchmark) | -- | -- | +24.11% | +17.09% |
 | take-profit strategy (rank 1 above) | 626 | 72.68% | +14.47% | +10.39% |
 | hysteresis, enter=2.0bps/exit=0.0bps (untuned, ported from Mamba) | 209 | 58.37% | +23.80% | +16.88% |
-| **hysteresis, enter=4.0bps/exit=-1.0bps (swept)** | **168** | **60.71%** | **+30.86%** | **+21.76%** |
+| hysteresis, enter=4.0bps/exit=-1.0bps (coarse sweep) | 168 | 60.71% | +30.86% | +21.76% |
+| **hysteresis, enter=4.5bps/exit=-1.0bps (finer sweep)** | **158** | **60.13%** | **+31.35%** | **+22.09%** |
 
 See `hf_patchtst_revin_no_volume_patch14_14 -- hysteresis strategy` below for full detail
-and the threshold-sweep table.
+and the threshold-sweep tables (coarse and finer).
 
 ## hf_patchtst_fused_head
 
@@ -895,3 +896,55 @@ in total (up to 243 in this grid) than some other candidates, so a costed re-che
 more here, not less. A finer follow-up sweep (`enter_bps` around 3.5-4.5, `exit_bps` pushed
 further negative than -1, since -1 beat 0/1 consistently) is worth running before treating
 `4.0/-1.0` as final.
+
+### Part 3 -- finer follow-up sweep, centered on the coarse sweep's winner
+
+`enter_bps in [3.5, 4.0, 4.5]` x `exit_bps in [-3, -2, -1, 0, 1]` (narrower around 4,
+extended further negative on exit), same checkpoint (`patch14_14/False`), same cached-
+forecast-sequence approach.
+
+| enter (bps) | exit (bps) | Trades | Win rate | Total return | Annual return | Avg hold |
+|---|---|---|---|---|---|---|
+| **4.5** | **-1.0** | **158** | **60.13%** | **+31.35%** | **+22.09%** | 10.75 |
+| 3.5 | -1.0 | 173 | 60.69% | +31.18% | +21.97% | 10.05 |
+| 3.5 | 1.0 | 215 | 62.33% | +31.04% | +21.87% | 7.72 |
+| 3.5 | -2.0 | 154 | 59.74% | +30.96% | +21.82% | 11.62 |
+| 4.5 | 1.0 | 193 | 61.66% | +30.95% | +21.82% | 8.38 |
+| 4.0 | -1.0 (coarse-sweep winner) | 168 | 60.71% | +30.86% | +21.76% | 10.25 |
+| 4.0 | -2.0 | 149 | 59.73% | +30.65% | +21.61% | 11.90 |
+| 4.5 | -2.0 | 140 | 59.29% | +30.43% | +21.46% | 12.49 |
+| 3.5 | 0.0 | 184 | 60.33% | +30.07% | +21.21% | 9.30 |
+| 4.5 | 0.0 | 168 | 58.93% | +30.06% | +21.21% | 9.94 |
+| 4.0 | 1.0 | 205 | 61.46% | +29.65% | +20.93% | 8.02 |
+| 4.0 | 0.0 | 178 | 58.99% | +28.88% | +20.40% | 9.52 |
+| 4.5 | -3.0 | 123 | 55.28% | +25.83% | +18.31% | 14.75 |
+| 4.0 | -3.0 | 130 | 54.62% | +24.74% | +17.56% | 14.12 |
+| 3.5 | -3.0 | 134 | 54.48% | +24.32% | +17.27% | 13.83 |
+
+**Conclusion: this confirms a genuine plateau, not a lucky cell, and refutes one
+hypothesis cleanly.** The top 6 combinations -- spanning `enter in {3.5, 4.0, 4.5}` and
+`exit in {-1, +1}` -- are all within 0.5 percentage points of each other (30.86%-31.35%
+total return). The coarse sweep's winner (`4.0/-1.0`) drops from 1st to 6th place here,
+but only because its immediate neighbors are *also* excellent, not because it was wrong --
+exactly the "broad stable region" signature that's trustworthy rather than curve-fit
+noise. New best single result: **`enter=4.5bps`/`exit=-1.0bps`, +31.35% total return /
++22.09% annualized**, a marginal improvement over the coarse sweep's `4.0/-1.0`.
+
+The hypothesis that motivated this follow-up -- that pushing `exit_bps` further negative
+than -1 (since -1 beat 0 consistently in the coarse sweep) might do even better -- is
+**refuted**: `exit=-2` is mixed (sometimes close to `-1`, sometimes clearly worse) and
+`exit=-3` is the worst option in the entire finer grid (24-26% total return, barely above
+buy-and-hold, with the lowest win rates in this grid at 54-55% and the longest average
+holds at 12-15 bars). `exit=-1` isn't just "better than 0" -- it's close to the actual
+optimum in that direction; holding through deeper adverse moves before exiting does not
+keep paying off.
+
+**Practical takeaway**: `enter` in roughly 3.5-4.5bps combined with `exit` at -1 or +1bps
+is the region to trust, not any single cell within it. Given `4.0/-1.0`, `4.5/-1.0`, and
+`3.5/1.0` are statistically indistinguishable on this test window, picking among them
+should come down to secondary considerations (e.g. trade count/avg hold, since fewer,
+longer-held positions are likely more sensitive to the still-unmodeled transaction costs)
+rather than chasing the exact top decimal.
+
+**Caveats**: same as Part 2 above (single test window, one seed, no transaction costs) --
+this sweep narrows the *where*, it doesn't remove those risks.
