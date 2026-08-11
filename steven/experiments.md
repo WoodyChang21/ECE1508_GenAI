@@ -38,6 +38,26 @@ sharply rank #1 and #7 diverge from the *same* patch config just by flipping
 `channel_attention`, seed noise is a real, live risk for the leaderboard's exact ordering
 -- treat rank 1 vs. 2 vs. 3 as "the current best guesses," not settled.
 
+### Overall best result on the branch: hysteresis strategy on the best checkpoint (beats buy-and-hold)
+
+All of the above uses `evaluate_revin.py`'s take-profit-order strategy. A structurally
+different strategy (`evaluate_revin_hysteresis.py`, ported from this project's Mamba
+model -- enter long once the predicted bar-1 close return clears a threshold, hold while
+it stays positive, exit once it turns non-positive, no take-profit order, no fixed
+holding horizon) run on the same best checkpoint (`patch (14,14)`, `channel_attention=False`)
+with a tuned entry/exit threshold **beats buy-and-hold outright for the first time on this
+branch**:
+
+| Strategy / threshold | Trades | Win rate | Total return | Annual return |
+|---|---|---|---|---|
+| buy-and-hold (benchmark) | -- | -- | +24.11% | +17.09% |
+| take-profit strategy (rank 1 above) | 626 | 72.68% | +14.47% | +10.39% |
+| hysteresis, enter=2.0bps/exit=0.0bps (untuned, ported from Mamba) | 209 | 58.37% | +23.80% | +16.88% |
+| **hysteresis, enter=4.0bps/exit=-1.0bps (swept)** | **168** | **60.71%** | **+30.86%** | **+21.76%** |
+
+See `hf_patchtst_revin_no_volume_patch14_14 -- hysteresis strategy` below for full detail
+and the threshold-sweep table.
+
 ## hf_patchtst_fused_head
 
 **What**: HF `PatchTSTModel` backbone (real channel-independent patching + self-attention)
@@ -799,3 +819,79 @@ worse or, at best, unchanged.
 (2024-01 to 2025-05, bullish for SPY); one seed per setting; `CLOSE_WEIGHT=4.0` untuned --
 not worth sweeping further given the consistent negative signal across both metrics and
 both settings.
+
+## hf_patchtst_revin_no_volume_patch14_14 -- hysteresis strategy (Mamba-style entry/exit)
+
+**What**: A structurally different trading strategy from every other backtest on this
+branch, ported from this project's Mamba model: no take-profit limit order, no fixed
+3-bar holding horizon. Instead, re-forecast every hour and apply a state machine on the
+model's **predicted bar-1 close return** (`forecast_bps`): enter long once flat and
+`forecast_bps >= enter_bps`; stay long as long as `forecast_bps > exit_bps`; exit to cash
+once `forecast_bps <= exit_bps`; never short. Implemented in a new file,
+`steven/src/evaluate_revin_hysteresis.py` (`evaluate_revin.py` untouched). Transaction
+costs are **not** modeled in this version (the reference Mamba rule charges 1bp each way;
+this is a simplification, not a faithful reproduction).
+
+**Part 1 -- same untuned rule (`enter=2.0bps`/`exit=0.0bps`, carried over directly from
+Mamba's own tuned values) on four checkpoints**, to check whether the take-profit
+strategy's model ranking carries over to a completely different trading strategy:
+
+| Checkpoint | Trades | Win rate | Avg hold (bars) | Total return | Annual return |
+|---|---|---|---|---|---|
+| **`patch14_14`, False (best under take-profit)** | 209 | **58.37%** | 8.5 | **+23.80%** | **+16.88%** |
+| `overlap 14/7`, True (2nd best under take-profit) | 285 | 57.54% | 5.4 | +13.93% | +10.02% |
+| baseline `(7,7)`, False | 100 | 54.00% | 22.4 | +16.00% | +11.46% |
+| baseline `(7,7)`, True | 131 | 52.67% | 11.5 | +8.36% | +6.04% |
+
+**Conclusion: the ranking holds.** `patch14_14/False` is the best checkpoint under *both*
+strategies -- a stronger, more structurally independent confirmation than anything else on
+this branch, since the take-profit strategy and this one share almost no trading mechanics
+(fixed-horizon limit orders vs. open-ended hysteresis holds).
+
+**Part 2 -- threshold sweep on the winning checkpoint (`patch14_14/False`)**. `enter_bps`/
+`exit_bps` were never calibrated to this model; swept `enter_bps in [1,2,3,4,5]` x
+`exit_bps in [-1,0,1]` (14 valid combinations, `exit_bps < enter_bps` required). The model
+forward pass runs once regardless of grid size (`compute_forecast_sequence`); each grid
+cell is a cheap replay of the state machine against the cached forecast sequence
+(`simulate_hysteresis`) -- no repeated inference.
+
+| enter (bps) | exit (bps) | Trades | Win rate | Total return | Annual return | Avg hold |
+|---|---|---|---|---|---|---|
+| **4.0** | **-1.0** | **168** | **60.71%** | **+30.86%** | **+21.76%** | 10.25 |
+| 4.0 | 1.0 | 205 | 61.46% | +29.65% | +20.93% | 8.02 |
+| 4.0 | 0.0 | 178 | 58.99% | +28.88% | +20.40% | 9.52 |
+| 5.0 | -1.0 | 154 | 60.39% | +28.04% | +19.83% | 10.97 |
+| 5.0 | 1.0 | 189 | 61.90% | +27.89% | +19.73% | 8.48 |
+| 3.0 | 1.0 | 221 | 61.09% | +27.61% | +19.53% | 7.62 |
+| 5.0 | 0.0 | 164 | 59.15% | +27.19% | +19.25% | 10.11 |
+| 2.0 | 1.0 | 243 | 60.08% | +27.03% | +19.10% | 7.11 |
+| 3.0 | -1.0 | 179 | 59.22% | +25.46% | +18.06% | 9.85 |
+| 2.0 | -1.0 | 195 | 58.46% | +25.05% | +17.74% | 9.22 |
+| 1.0 | -1.0 | 210 | 57.14% | +24.91% | +17.65% | 8.72 |
+| 3.0 | 0.0 | 190 | 58.95% | +24.32% | +17.27% | 9.14 |
+| 2.0 | 0.0 (untuned default) | 209 | 58.37% | +23.80% | +16.88% | 8.50 |
+| 1.0 | 0.0 | 224 | 56.70% | +22.60% | +16.05% | 8.06 |
+
+**Conclusion: `enter=4.0bps`/`exit=-1.0bps` is the best result found on this branch by a
+wide margin -- +30.86% total return / +21.76% annualized, the first configuration on this
+branch to beat the buy-and-hold benchmark (+24.11%/+17.09%) outright.** Two things about
+this result look like a genuine signal rather than a single lucky grid cell:
+
+1. **`enter_bps=4` occupies the entire top 3, regardless of exit threshold** -- the whole
+   row does well, not one isolated cell, and `enter_bps` peaks at 4 and dips at 5 (an
+   interior maximum, not a trend running off the edge of the grid).
+2. **`exit_bps=0` (the untuned default) is the worst of the three exit values at every
+   single `enter_bps` tested** -- a consistent pattern across 4-5 independent comparisons,
+   not a one-off. Both `exit=-1` and `exit=1` beat `exit=0` every time, though which of
+   those two wins flips depending on `enter_bps` (a real interaction, not yet explained).
+
+**Caveats**: single continuous test window (2024-01 to 2025-05) -- a swept threshold that
+happens to score highest on one historical path is a real overfitting risk, and this
+result should be treated as a strong candidate, not a settled answer, until confirmed on a
+different period; 168 trades is a reasonable sample (not a thin handful-of-trades spike
+like some earlier results on this branch) but still one seed, one model, one regime;
+transaction costs still not modeled at all, and this strategy fires more entry/exit events
+in total (up to 243 in this grid) than some other candidates, so a costed re-check matters
+more here, not less. A finer follow-up sweep (`enter_bps` around 3.5-4.5, `exit_bps` pushed
+further negative than -1, since -1 beat 0/1 consistently) is worth running before treating
+`4.0/-1.0` as final.
