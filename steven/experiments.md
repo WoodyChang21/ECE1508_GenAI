@@ -54,10 +54,20 @@ branch**:
 | take-profit strategy (rank 1 above) | 626 | 72.68% | +14.47% | +10.39% |
 | hysteresis, enter=2.0bps/exit=0.0bps (untuned, ported from Mamba) | 209 | 58.37% | +23.80% | +16.88% |
 | hysteresis, enter=4.0bps/exit=-1.0bps (coarse sweep) | 168 | 60.71% | +30.86% | +21.76% |
-| **hysteresis, enter=4.5bps/exit=-1.0bps (finer sweep)** | **158** | **60.13%** | **+31.35%** | **+22.09%** |
+| hysteresis, enter=4.5bps/exit=-1.0bps (finer sweep, cost-free) | 158 | 60.13% | +31.35% | +22.09% |
+| **hysteresis, enter=4.5bps/exit=-1.0bps + 1bp cost each way (final, realistic)** | **158** | **57.59%** | **+27.27%** | **+19.30%** |
+
+The finer sweep's winning threshold (`enter=4.5bps`/`exit=-1.0bps`) still beats buy-and-hold
+**after adding a realistic 1bp-on-entry + 1bp-on-exit transaction cost** (matching the
+reference Mamba rule) -- total return drops from +31.35% to +27.27% and win rate from
+60.13% to 57.59% (a few marginally-profitable trades flip to marginal losses once ~2bps
+round-trip is subtracted), but +27.27%/+19.30% still clears the +24.11%/+17.09% benchmark.
+This is now the headline result for the strategy: `evaluate_revin_hysteresis.py`'s CLI
+defaults are set to this exact configuration (`--enter-bps 4.5 --exit-bps -1.0
+--cost-bps 1.0`).
 
 See `hf_patchtst_revin_no_volume_patch14_14 -- hysteresis strategy` below for full detail
-and the threshold-sweep tables (coarse and finer).
+and the threshold-sweep tables (coarse and finer, both cost-free) plus the final costed run.
 
 ## hf_patchtst_fused_head
 
@@ -829,9 +839,10 @@ branch, ported from this project's Mamba model: no take-profit limit order, no f
 model's **predicted bar-1 close return** (`forecast_bps`): enter long once flat and
 `forecast_bps >= enter_bps`; stay long as long as `forecast_bps > exit_bps`; exit to cash
 once `forecast_bps <= exit_bps`; never short. Implemented in a new file,
-`steven/src/evaluate_revin_hysteresis.py` (`evaluate_revin.py` untouched). Transaction
-costs are **not** modeled in this version (the reference Mamba rule charges 1bp each way;
-this is a simplification, not a faithful reproduction).
+`steven/src/evaluate_revin_hysteresis.py` (`evaluate_revin.py` untouched). Parts 1-3 below
+were run with `--cost-bps 0` (no transaction costs) to isolate the threshold search from
+cost effects; Part 4 adds the 1bp-each-way cost (matching the reference Mamba rule) at the
+winning threshold and is now the strategy's headline, cost-inclusive result.
 
 **Part 1 -- same untuned rule (`enter=2.0bps`/`exit=0.0bps`, carried over directly from
 Mamba's own tuned values) on four checkpoints**, to check whether the take-profit
@@ -948,3 +959,33 @@ rather than chasing the exact top decimal.
 
 **Caveats**: same as Part 2 above (single test window, one seed, no transaction costs) --
 this sweep narrows the *where*, it doesn't remove those risks.
+
+### Part 4 -- final costed backtest at the winning threshold
+
+`evaluate_revin_hysteresis.py` now defaults to `enter_bps=4.5`/`exit_bps=-1.0` (the finer
+sweep's winner) and adds a `--cost-bps` flag (default `1.0`, matching the reference Mamba
+rule) charged on both entry and exit -- modeled as slippage on the fill price
+(`effective_entry = entry_price * (1 + cost_bps/10000)`,
+`effective_exit = exit_price * (1 - cost_bps/10000)`) so it compounds correctly through the
+equity curve rather than being a flat per-trade fee. Re-running the winning config with
+this cost switched on:
+
+| | Cost-free (finer sweep) | With 1bp cost each way |
+|---|---|---|
+| Trades | 158 | 158 |
+| Win rate | 60.13% | 57.59% |
+| Total return | +31.35% | +27.27% |
+| Annual return | +22.09% | +19.30% |
+| Avg bars held | 10.75 | 10.75 |
+
+**Conclusion: the edge survives realistic transaction costs.** Costs give back about 4
+percentage points of total return (31.35% -> 27.27%) and ~2.5 points of win rate (60.13% ->
+57.59%) -- consistent with ~2bps round-trip friction on 158 trades compounding over the
+window -- but the strategy still clears the buy-and-hold benchmark (+24.11%/+17.09%) after
+costs, +27.27%/+19.30%. Trade count and average hold are unaffected (costs don't change the
+entry/exit decision logic, only the realized P&L per trade). This is now the strategy's
+headline number and the config baked into the script's defaults.
+
+**Caveats**: still a single test window, one seed, one checkpoint; `cost_bps=1.0` is an
+assumption carried over from the reference Mamba rule, not independently validated for this
+model's trade frequency/size.
