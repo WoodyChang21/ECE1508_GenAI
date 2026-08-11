@@ -220,5 +220,9 @@ __marimo__/
 # Project data — raw downloads excluded; processed outputs committed
 /data/raw/
 
+# Regenerated fresh each run by fetch_ood_data.py (out-of-distribution backtest data) --
+# a daily-changing snapshot, not meant to be committed.
+steven/data/spy_ohlcv_1h_extended.parquet
+
 # macOS
 .DS_Store

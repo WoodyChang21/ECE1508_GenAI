@@ -31,6 +31,17 @@ Defaults for `--enter-bps`/`--exit-bps` (4.5 / -1.0) are the winning configurati
 by sweeping this strategy's thresholds against the best checkpoint -- see the "Threshold
 sweep" section below and steven/experiments.md for the sweep results these came from.
 
+**Out-of-distribution backtest** (`--data-path`/`--test-start`/`--test-end`): the
+checkpoint's own config always points at `steven/data/spy_ohlcv_1h.parquet` (2010-01 ..
+2025-05-30) and, by default, backtests on that file's built-in chronological test split
+(2024-01 .. 2025-05-30 -- data the model never trained on, but from the same period the
+train/val split's normalization etc. were calibrated against). `--data-path` overrides
+which parquet to load (e.g. an extended file produced by `fetch_ood_data.py`, which
+appends newly-fetched bars past 2025-05-30); `--test-start`/`--test-end` (YYYY-MM-DD,
+`--test-end` optional, defaults to the last available bar) then pick a custom test range
+within it instead of the checkpoint's built-in split -- e.g. everything from 2025-06-01
+onward, genuinely out-of-distribution data the model has never seen in any form.
+
 Reuses `evaluate_revin.py`'s model loading, per-window prediction closure, and
 benchmark functions (buy-and-hold, naive periodic, equity_stats) unchanged -- only the
 decision rule and walk-forward loop are new. Does not modify evaluate_revin.py.
@@ -128,7 +139,38 @@ def parse_args() -> argparse.Namespace:
         "--exit-bps-grid", type=str, default="-1,0,1",
         help="Comma-separated exit_bps values to sweep (--sweep only).",
     )
+    p.add_argument(
+        "--data-path", type=str, default=None,
+        help="Override the checkpoint's cfg['data_path'] -- e.g. an extended parquet "
+        "with newly-fetched out-of-distribution bars appended (see fetch_ood_data.py). "
+        "Combine with --test-start/--test-end to backtest on that new range.",
+    )
+    p.add_argument(
+        "--test-start", type=str, default=None,
+        help="YYYY-MM-DD. Overrides the checkpoint's built-in chronological test split "
+        "lower bound with a custom one (e.g. right after the original dataset's last "
+        "date, to backtest on genuinely out-of-distribution data).",
+    )
+    p.add_argument(
+        "--test-end", type=str, default=None,
+        help="YYYY-MM-DD, inclusive. Only used together with --test-start; defaults to "
+        "the last available bar in the dataset if omitted.",
+    )
     return p.parse_args()
+
+
+def resolve_test_bounds(df: pd.DataFrame, test_start: str, test_end: str | None) -> tuple[int, int]:
+    """Custom [lo, hi) test range cut on real calendar dates, independent of
+    data_pipeline's built-in TEST_START/TEST_END -- same searchsorted logic as
+    `chronological_bounds`, just parameterized so callers can point it at dates outside
+    the checkpoint's original split (e.g. an out-of-distribution range)."""
+    dt = df["datetime"].values
+    lo = int(np.searchsorted(dt, np.datetime64(test_start)))
+    if test_end:
+        hi = int(np.searchsorted(dt, np.datetime64(test_end) + np.timedelta64(1, "D")))
+    else:
+        hi = len(df)
+    return lo, hi
 
 
 def compute_forecast_sequence(
@@ -295,7 +337,8 @@ def main() -> None:
             "'raw_price_revin_no_volume' (hf_patchtst_revin_no_volume checkpoints only)."
         )
 
-    df, bounds, stats = build_dataset(cfg["data_path"])
+    data_path = args.data_path or cfg["data_path"]
+    df, bounds, stats = build_dataset(data_path)
     ohlc_arr = df[OHLC_COLS].to_numpy(dtype=np.float32)
     closes = df["close"].to_numpy(dtype=np.float64)
     ctx_bars = cfg["context_length"]
@@ -304,7 +347,14 @@ def main() -> None:
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 
-    test_lo, test_hi = bounds["test"]
+    if args.test_start:
+        test_lo, test_hi = resolve_test_bounds(df, args.test_start, args.test_end)
+        logger.info(
+            "using custom test range %s..%s -> rows %d..%d (data_path=%s)",
+            args.test_start, args.test_end or "<end of data>", test_lo, test_hi, data_path,
+        )
+    else:
+        test_lo, test_hi = bounds["test"]
     wf_entry_idx = test_lo + ctx_bars - 1
     predict_fn = make_patchtst_revin_predict_fn(model, device)
 
@@ -335,6 +385,8 @@ def main() -> None:
             "hysteresis_sweep": {
                 "checkpoint": args.checkpoint,
                 "checkpoint_config": cfg,
+                "data_path": data_path,
+                "test_range_rows": [test_lo, test_hi],
                 "ctx_bars": ctx_bars,
                 "enter_bps_grid": enter_grid,
                 "exit_bps_grid": exit_grid,
@@ -372,6 +424,8 @@ def main() -> None:
         "hysteresis_walk_forward": {
             "checkpoint": args.checkpoint,
             "checkpoint_config": cfg,
+            "data_path": data_path,
+            "test_range_rows": [test_lo, test_hi],
             "ctx_bars": ctx_bars,
             "enter_bps": args.enter_bps,
             "exit_bps": args.exit_bps,
