@@ -22,11 +22,14 @@ consecutive hours the rolling forecast keeps clearing EXIT_BPS -- there is no fi
 holding horizon and no take-profit limit-order simulation at all. The walk therefore
 re-forecasts and re-evaluates the rule **every hour**, regardless of position state.
 
-Explicitly NOT modeled in this variant (by request): transaction costs. The reference
-Mamba rule this is ported from also charges 1bp on entry and 1bp on exit; this version
-omits both, so it is not a fully faithful reproduction of that strategy -- see the
-"transaction_costs" field in the output JSON and steven/experiments.md once this is
-logged.
+Transaction costs: 1bp is charged on entry and 1bp on exit by default (`--cost-bps`,
+matching the reference Mamba rule this is ported from), applied by shrinking the
+effective entry price up and the effective exit price down before computing
+trade_return -- see `simulate_hysteresis`. Pass `--cost-bps 0` to disable.
+
+Defaults for `--enter-bps`/`--exit-bps` (4.5 / -1.0) are the winning configuration found
+by sweeping this strategy's thresholds against the best checkpoint -- see the "Threshold
+sweep" section below and steven/experiments.md for the sweep results these came from.
 
 Reuses `evaluate_revin.py`'s model loading, per-window prediction closure, and
 benchmark functions (buy-and-hold, naive periodic, equity_stats) unchanged -- only the
@@ -93,16 +96,23 @@ def parse_args() -> argparse.Namespace:
         "(single-run mode) or steven/outputs/backtest_hysteresis_sweep_<stem>.json (--sweep).",
     )
     p.add_argument(
-        "--enter-bps", type=float, default=2.0,
+        "--enter-bps", type=float, default=4.5,
         help="Single-run mode only. Minimum predicted bar-1 close return (bps) required "
-        "to enter long from flat.",
+        "to enter long from flat. Default 4.5 is the best configuration found by the "
+        "enter/exit threshold sweep (see steven/experiments.md).",
     )
     p.add_argument(
-        "--exit-bps", type=float, default=0.0,
+        "--exit-bps", type=float, default=-1.0,
         help="Single-run mode only. Exit an open long once the predicted bar-1 close "
         "return drops to/below this (bps). Between exit_bps and enter_bps is the 'stay "
         "long, don't re-enter' band -- the hysteresis gap that keeps a noisy forecast "
-        "from flip-flopping the position.",
+        "from flip-flopping the position. Default -1.0 is the best configuration found "
+        "by the threshold sweep (see steven/experiments.md).",
+    )
+    p.add_argument(
+        "--cost-bps", type=float, default=1.0,
+        help="Transaction cost charged on both entry and exit, in bps of the fill price "
+        "(default 1.0, matching the reference Mamba rule). Pass 0 to disable.",
     )
     p.add_argument(
         "--sweep", action="store_true",
@@ -147,11 +157,19 @@ def compute_forecast_sequence(
     return forecast_seq
 
 
-def simulate_hysteresis(forecast_seq: list[dict], enter_bps: float, exit_bps: float) -> dict:
+def simulate_hysteresis(
+    forecast_seq: list[dict], enter_bps: float, exit_bps: float, cost_bps: float = 1.0,
+) -> dict:
     """Cheap replay of the enter/stay/exit state machine against an already-computed
     forecast sequence -- no model calls, so this is fast enough to call once per grid
     cell in a sweep. Same rule and same force-close-at-end behavior as the original
-    single-pass walk (see module docstring)."""
+    single-pass walk (see module docstring).
+
+    Transaction costs (`cost_bps`, charged on both entry and exit) are modeled by
+    shrinking the effective entry price up and the effective exit price down by
+    `cost_bps` before computing trade_return -- i.e. as slippage on the fill price,
+    not a flat fee, so it compounds correctly with `equity *= 1.0 + trade_return`."""
+    cost_frac = cost_bps / 10000.0
     equity = 1.0
     position = "flat"
     entry_price = None
@@ -168,7 +186,9 @@ def simulate_hysteresis(forecast_seq: list[dict], enter_bps: float, exit_bps: fl
                 entry_idx = decision_idx
         else:  # position == "long"
             if forecast_bps <= exit_bps:
-                trade_return = close_0 / entry_price - 1.0
+                effective_entry = entry_price * (1.0 + cost_frac)
+                effective_exit = close_0 * (1.0 - cost_frac)
+                trade_return = effective_exit / effective_entry - 1.0
                 equity *= 1.0 + trade_return
                 trades.append({
                     "entry_idx": entry_idx, "exit_idx": decision_idx,
@@ -184,7 +204,9 @@ def simulate_hysteresis(forecast_seq: list[dict], enter_bps: float, exit_bps: fl
     position_open_at_end = position == "long"
     if position_open_at_end and forecast_seq:
         last = forecast_seq[-1]
-        trade_return = last["close_0"] / entry_price - 1.0
+        effective_entry = entry_price * (1.0 + cost_frac)
+        effective_exit = last["close_0"] * (1.0 - cost_frac)
+        trade_return = effective_exit / effective_entry - 1.0
         equity *= 1.0 + trade_return
         trades.append({
             "entry_idx": entry_idx, "exit_idx": last["decision_idx"],
@@ -201,14 +223,14 @@ def simulate_hysteresis(forecast_seq: list[dict], enter_bps: float, exit_bps: fl
 
 def run_hysteresis_walk_forward(
     predict_fn, ohlc_arr: np.ndarray, test_lo: int, test_hi: int, ctx_bars: int,
-    enter_bps: float, exit_bps: float,
+    enter_bps: float, exit_bps: float, cost_bps: float = 1.0,
 ) -> dict:
     """Single-run convenience wrapper: compute the forecast sequence once, then replay
     the rule for this one (enter_bps, exit_bps) pair. Kept for backwards compatibility
     (single-run CLI mode) -- --sweep calls compute_forecast_sequence/simulate_hysteresis
     directly instead, to avoid recomputing the sequence per grid cell."""
     forecast_seq = compute_forecast_sequence(predict_fn, ohlc_arr, test_lo, test_hi, ctx_bars)
-    result = simulate_hysteresis(forecast_seq, enter_bps, exit_bps)
+    result = simulate_hysteresis(forecast_seq, enter_bps, exit_bps, cost_bps)
     return {
         "trades": result["trades"], "decisions": forecast_seq,
         "equity_final": result["equity_final"], "position_open_at_end": result["position_open_at_end"],
@@ -242,6 +264,7 @@ def hysteresis_stats(df: pd.DataFrame, result: dict, n_decisions: int | None = N
 
 def run_sweep(
     df: pd.DataFrame, forecast_seq: list[dict], enter_grid: list[float], exit_grid: list[float],
+    cost_bps: float = 1.0,
 ) -> list[dict]:
     """Evaluates every (enter_bps, exit_bps) combination with exit_bps < enter_bps
     against the cached forecast_seq (no model calls), sorted by total_return
@@ -252,7 +275,7 @@ def run_sweep(
         for exit_bps in exit_grid:
             if exit_bps >= enter_bps:
                 continue  # degenerate: no real "stay" band, skip
-            result = simulate_hysteresis(forecast_seq, enter_bps, exit_bps)
+            result = simulate_hysteresis(forecast_seq, enter_bps, exit_bps, cost_bps)
             stats = hysteresis_stats(df, result, n_decisions=len(forecast_seq))
             rows.append({"enter_bps": enter_bps, "exit_bps": exit_bps, **stats})
     rows.sort(key=lambda r: r["total_return"], reverse=True)
@@ -293,10 +316,11 @@ def main() -> None:
         )
         forecast_seq = compute_forecast_sequence(predict_fn, ohlc_arr, test_lo, test_hi, ctx_bars)
         logger.info(
-            "sweeping enter_bps=%s x exit_bps=%s (%d decisions cached, no further model calls)...",
-            enter_grid, exit_grid, len(forecast_seq),
+            "sweeping enter_bps=%s x exit_bps=%s (cost_bps=%.1f, %d decisions cached, "
+            "no further model calls)...",
+            enter_grid, exit_grid, args.cost_bps, len(forecast_seq),
         )
-        sweep_rows = run_sweep(df, forecast_seq, enter_grid, exit_grid)
+        sweep_rows = run_sweep(df, forecast_seq, enter_grid, exit_grid, args.cost_bps)
         logger.info("sweep results (sorted by total_return, best first):")
         for row in sweep_rows:
             logger.info(
@@ -314,7 +338,7 @@ def main() -> None:
                 "ctx_bars": ctx_bars,
                 "enter_bps_grid": enter_grid,
                 "exit_bps_grid": exit_grid,
-                "transaction_costs": "none -- not modeled in this variant (requested)",
+                "transaction_costs": f"{args.cost_bps:.1f}bps on entry + {args.cost_bps:.1f}bps on exit",
                 "buy_and_hold": buy_and_hold_benchmark(df, wf_entry_idx, test_hi - 1),
                 "naive_periodic": naive_periodic_benchmark(df, closes, wf_entry_idx, test_hi),
                 "sweep_results": sweep_rows,
@@ -332,11 +356,11 @@ def main() -> None:
 
     logger.info(
         "running hysteresis-band backtest (ctx=%d bars, enter>=%.1fbps, exit<=%.1fbps, "
-        "no transaction costs, %d..%d)...",
-        ctx_bars, args.enter_bps, args.exit_bps, test_lo, test_hi,
+        "cost_bps=%.1f, %d..%d)...",
+        ctx_bars, args.enter_bps, args.exit_bps, args.cost_bps, test_lo, test_hi,
     )
     wf = run_hysteresis_walk_forward(
-        predict_fn, ohlc_arr, test_lo, test_hi, ctx_bars, args.enter_bps, args.exit_bps
+        predict_fn, ohlc_arr, test_lo, test_hi, ctx_bars, args.enter_bps, args.exit_bps, args.cost_bps,
     )
     logger.info(
         "hysteresis walk-forward: %d trades / %d decisions%s",
@@ -351,7 +375,7 @@ def main() -> None:
             "ctx_bars": ctx_bars,
             "enter_bps": args.enter_bps,
             "exit_bps": args.exit_bps,
-            "transaction_costs": "none -- not modeled in this variant (requested)",
+            "transaction_costs": f"{args.cost_bps:.1f}bps on entry + {args.cost_bps:.1f}bps on exit",
             "buy_and_hold": buy_and_hold_benchmark(df, wf_entry_idx, test_hi - 1),
             "naive_periodic": naive_periodic_benchmark(df, closes, wf_entry_idx, test_hi),
             "patchtst_revin_hysteresis": hysteresis_stats(df, wf, n_decisions=len(wf["decisions"])),
