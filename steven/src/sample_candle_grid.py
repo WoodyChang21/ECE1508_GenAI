@@ -39,6 +39,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefm
 logger = logging.getLogger(__name__)
 
 
+def resolve_device(name: str) -> torch.device:
+    if name == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(name)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--cvae-checkpoint", type=str, default="steven/outputs/cvae_checkpoint_generative.pt")
@@ -53,13 +63,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--generic-title", action="store_true", help="Suptitle omits the trend label/start_idx/checkpoint name -- use when only showing one example and don't want to imply it's representative or reveal internal labeling.")
     p.add_argument("--out-dir", type=str, default="steven/outputs/generative_plots")
     p.add_argument("--seed", type=int, default=123)
-    p.add_argument("--device", type=str, default="cpu")
+    p.add_argument("--device", type=str, default="auto")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    device = torch.device(args.device)
+    device = resolve_device(args.device)
     torch.manual_seed(args.seed)
 
     ckpt = torch.load(args.cvae_checkpoint, map_location=device, weights_only=False)

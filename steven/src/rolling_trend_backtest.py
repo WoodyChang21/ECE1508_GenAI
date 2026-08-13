@@ -29,6 +29,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefm
 logger = logging.getLogger(__name__)
 
 
+def resolve_device(name: str) -> torch.device:
+    if name == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(name)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--cvae-checkpoint", type=str, default="steven/outputs/cvae_checkpoint_h1.pt")
@@ -38,14 +48,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stop-loss-pct", type=float, default=0.01, help="Hard stop-loss, fraction below entry (0.01 = 1%%).")
     p.add_argument("--ctx-bars", type=int, default=WALK_FORWARD_CTX_BARS)
     p.add_argument("--split", type=str, default="test", choices=["val", "test"])
-    p.add_argument("--device", type=str, default="cpu")
+    p.add_argument("--device", type=str, default="auto")
     p.add_argument("--metrics-out", type=str, default="steven/outputs/rolling_backtest_metrics.json")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    device = torch.device(args.device)
+    device = resolve_device(args.device)
+    logger.info("device: %s", device)
 
     ckpt = torch.load(args.cvae_checkpoint, map_location=device, weights_only=False)
     cfg = ckpt["config"]

@@ -83,6 +83,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefm
 logger = logging.getLogger(__name__)
 
 
+def resolve_device(name: str) -> torch.device:
+    if name == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(name)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--cvae-checkpoint", type=str, default="steven/outputs/cvae_checkpoint_generative.pt")
@@ -94,7 +104,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sell-bound-percentile", type=float, default=99.0)
     p.add_argument("--trend-lookback", type=int, default=20)
     p.add_argument("--seed", type=int, default=123)
-    p.add_argument("--device", type=str, default="cpu")
+    p.add_argument("--device", type=str, default="auto")
     p.add_argument("--metrics-out", type=str, default="steven/outputs/walk_forward_trend_gate_metrics.json")
     return p.parse_args()
 
@@ -116,7 +126,7 @@ def make_trend_gated_predict_fn(base_predict_fn, feat, body_ret_col, trend_lookb
 
 def main() -> None:
     args = parse_args()
-    device = torch.device(args.device)
+    device = resolve_device(args.device)
     allowed_labels = set(args.allowed_labels.split(","))
 
     ckpt = torch.load(args.cvae_checkpoint, map_location=device, weights_only=False)
