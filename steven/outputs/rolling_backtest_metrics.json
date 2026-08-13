@@ -1,0 +1,40 @@
+{
+  "checkpoint": "steven/outputs/cvae_checkpoint_h1.pt",
+  "consensus_up_threshold": 0.6,
+  "consensus_down_threshold": 0.4,
+  "stop_loss_pct": 0.01,
+  "num_samples": 5,
+  "ctx_bars": 70,
+  "split": "test",
+  "rolling_backtest": {
+    "n_decisions": 2399,
+    "n_trades": 513,
+    "forced_close_at_end": false,
+    "outcome_breakdown": {
+      "enter": 0.21383909962484368,
+      "hold": 0.037098791162984576,
+      "no_trade": 0.535223009587328,
+      "exit_stop_loss": 0.007919966652771988,
+      "exit_divergence_loss": 0.09545644018340975,
+      "exit_downtrend_signal": 0.11046269278866194
+    },
+    "total_return": 0.05721242930014947,
+    "win_rate": 0.5126705653021443,
+    "avg_return": 0.0001190570942805623,
+    "entry_date": "2024-01-17",
+    "entry_price": 472.5,
+    "exit_date": "2025-05-30",
+    "exit_price": 588.29,
+    "elapsed_years": 1.3665297741273101,
+    "annual_return": 0.04155323887256701
+  },
+  "buy_and_hold": {
+    "entry_date": "2024-01-16",
+    "entry_price": 474.95,
+    "exit_date": "2025-05-30",
+    "exit_price": 589.46,
+    "elapsed_years": 1.3689253935660506,
+    "total_return": 0.24109906305926954,
+    "annual_return": 0.17091564847596086
+  }
+}
