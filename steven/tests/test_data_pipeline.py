@@ -55,21 +55,25 @@ def test_reconstruct_prices_round_trip():
     start_idx = 0
     window = dp.build_window(feat, opens, closes, start_idx, ctx_bars)
 
-    price_components = window["y"][:12].reshape(3, 4)
+    n_price = dp.HORIZON * 4
+    price_components = window["y"][:n_price].reshape(dp.HORIZON, 4)
     reconstructed = dp.reconstruct_prices(price_components, window["close_0"])
 
     # compute_raw_features drops the very first row of `raw` -- compare against
     # feat_df (which retains the original OHLC columns), not raw, to stay aligned.
     hz_start = start_idx + ctx_bars
-    true_ohlc = feat_df.iloc[hz_start : hz_start + 3][["open", "high", "low", "close"]].to_numpy()
+    true_ohlc = feat_df.iloc[hz_start : hz_start + dp.HORIZON][["open", "high", "low", "close"]].to_numpy()
 
     np.testing.assert_allclose(reconstructed, true_ohlc, rtol=1e-6, atol=1e-6)
 
 
-def test_anchor_correction_matches_close_0_for_all_horizon_bars():
-    """open_ret for every horizon bar should equal ln(open / close_0), including bar 1
-    (chained) and bars 2-3 (explicitly corrected) -- they must agree since bar 1's
-    chained reference already equals close_0."""
+def test_bar0_open_ret_matches_close_0_with_no_explicit_correction():
+    """HORIZON=1 (steven4): there's only ever a bar 0, and it's already anchored to
+    close_0 by construction (the chained log-return in compute_raw_features), with no
+    explicit anchor-correction loop needed -- see build_window's HORIZON=1 note (the
+    pre-steven4 correction only existed for bars 1/2, which needed re-anchoring away from
+    a chained-but-model-predicted-at-inference previous horizon bar; bar 0 never had that
+    problem)."""
     raw = _make_synthetic_ohlcv(n_days=20, seed=2)
     feat_df = _featurize_and_normalize(raw)
     feat, opens, closes = dp.extract_arrays(feat_df)
@@ -80,9 +84,9 @@ def test_anchor_correction_matches_close_0_for_all_horizon_bars():
 
     hz_start = start_idx + ctx_bars
     close_0 = closes[hz_start - 1]
-    expected_open_ret = np.log(opens[hz_start : hz_start + 3] / close_0)
+    expected_open_ret = np.log(opens[hz_start] / close_0)
 
-    open_ret_from_y = window["y"][:12].reshape(3, 4)[:, 0]
+    open_ret_from_y = window["y"][0]  # bar 0's open_ret is y's first element
     np.testing.assert_allclose(open_ret_from_y, expected_open_ret, rtol=1e-6, atol=1e-8)
 
 
@@ -107,7 +111,7 @@ def test_build_window_shapes_and_masks():
         window = dp.build_window(feat, opens, closes, start_idx=0, ctx_bars=ctx_bars)
         assert window["masked_tensor"].shape == (dp.TOTAL_LEN, dp.N_CHANNELS)
         assert window["full_tensor"].shape == (dp.TOTAL_LEN, dp.N_CHANNELS)
-        assert window["y"].shape == (15,)
+        assert window["y"].shape == (dp.HORIZON * 5,)
 
         pad_len = dp.MAX_CONTEXT - ctx_bars
         padding_mask = window["masked_tensor"][:, dp.N_FEATURE_CHANNELS]
@@ -214,13 +218,14 @@ def test_exit_price_from_components_matches_manual_average():
 
     start_idx, ctx_bars = 5, 21
     window = dp.build_window(feat, opens, closes, start_idx, ctx_bars)
-    price_components = window["y"][:12].reshape(3, 4)
+    n_price = dp.HORIZON * 4
+    price_components = window["y"][:n_price].reshape(dp.HORIZON, 4)
 
     exit_price = dp.exit_price_from_components(price_components, window["close_0"])
 
     hz_start = start_idx + ctx_bars
-    true_bars = feat_df.iloc[hz_start : hz_start + 3][["open", "close"]].to_numpy()
-    expected = true_bars.sum() / 6.0  # (o1+c1+o2+c2+o3+c3) / 6
+    true_bars = feat_df.iloc[hz_start : hz_start + dp.HORIZON][["open", "close"]].to_numpy()
+    expected = true_bars.sum() / (2 * dp.HORIZON)  # mean of every bar's open+close
 
     np.testing.assert_allclose(exit_price, expected, rtol=1e-5)
 
@@ -232,8 +237,9 @@ def test_exit_price_from_components_batched():
     feat_df = _featurize_and_normalize(raw)
     feat, opens, closes = dp.extract_arrays(feat_df)
 
+    n_price = dp.HORIZON * 4
     windows = [dp.build_window(feat, opens, closes, i, 14) for i in (0, 5, 10)]
-    components = np.stack([w["y"][:12].reshape(3, 4) for w in windows])
+    components = np.stack([w["y"][:n_price].reshape(dp.HORIZON, 4) for w in windows])
     close_0 = np.array([w["close_0"] for w in windows])
 
     batched = dp.exit_price_from_components(components, close_0)
@@ -250,12 +256,13 @@ def test_max_close_from_components_matches_manual_max():
 
     start_idx, ctx_bars = 5, 21
     window = dp.build_window(feat, opens, closes, start_idx, ctx_bars)
-    price_components = window["y"][:12].reshape(3, 4)
+    n_price = dp.HORIZON * 4
+    price_components = window["y"][:n_price].reshape(dp.HORIZON, 4)
 
     take_profit = dp.max_close_from_components(price_components, window["close_0"])
 
     hz_start = start_idx + ctx_bars
-    true_closes = feat_df.iloc[hz_start : hz_start + 3]["close"].to_numpy()
+    true_closes = feat_df.iloc[hz_start : hz_start + dp.HORIZON]["close"].to_numpy()
     np.testing.assert_allclose(take_profit, true_closes.max(), rtol=1e-5)
 
 
@@ -264,8 +271,9 @@ def test_max_close_from_components_batched():
     feat_df = _featurize_and_normalize(raw)
     feat, opens, closes = dp.extract_arrays(feat_df)
 
+    n_price = dp.HORIZON * 4
     windows = [dp.build_window(feat, opens, closes, i, 14) for i in (0, 5, 10)]
-    components = np.stack([w["y"][:12].reshape(3, 4) for w in windows])
+    components = np.stack([w["y"][:n_price].reshape(dp.HORIZON, 4) for w in windows])
     close_0 = np.array([w["close_0"] for w in windows])
 
     batched = dp.max_close_from_components(components, close_0)
@@ -282,14 +290,15 @@ def test_per_bar_close_return_sign_matches_open_close_direction():
 
     start_idx, ctx_bars = 0, 14
     window = dp.build_window(feat, opens, closes, start_idx, ctx_bars)
-    price_components = window["y"][:12].reshape(3, 4)
+    n_price = dp.HORIZON * 4
+    price_components = window["y"][:n_price].reshape(dp.HORIZON, 4)
 
     close_ret = dp.per_bar_close_return(price_components)
-    assert close_ret.shape == (3,)
+    assert close_ret.shape == (dp.HORIZON,)
 
     hz_start = start_idx + ctx_bars
     close_0 = window["close_0"]
-    true_closes = feat_df.iloc[hz_start : hz_start + 3]["close"].to_numpy()
+    true_closes = feat_df.iloc[hz_start : hz_start + dp.HORIZON]["close"].to_numpy()
     expected_sign = np.sign(true_closes - close_0)
 
     np.testing.assert_array_equal(np.sign(close_ret), expected_sign)

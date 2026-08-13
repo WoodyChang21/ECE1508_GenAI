@@ -4,20 +4,21 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from src.data_pipeline import HORIZON
 from src.losses import cvae_loss, gaussian_nll, laplace_nll, weighted_mse_loss, weighted_nll_loss
 
 
 def _make_y(price: torch.Tensor, volume: torch.Tensor) -> torch.Tensor:
-    """Inverse of losses.unpack_y: price (B,3,4), volume (B,3) -> y (B,15)."""
+    """Inverse of losses.unpack_y: price (B,HORIZON,4), volume (B,HORIZON) -> y (B,HORIZON*5)."""
     return torch.cat([price.reshape(price.shape[0], -1), volume], dim=-1)
 
 
 def test_direction_loss_off_by_default_matches_old_behavior():
     torch.manual_seed(0)
-    pred_price = torch.randn(4, 3, 4) * 0.01
-    pred_volume = torch.randn(4, 3)
-    true_price = torch.randn(4, 3, 4) * 0.01
-    true_volume = torch.randn(4, 3)
+    pred_price = torch.randn(4, HORIZON, 4) * 0.01
+    pred_volume = torch.randn(4, HORIZON)
+    true_price = torch.randn(4, HORIZON, 4) * 0.01
+    true_volume = torch.randn(4, HORIZON)
     true_y = _make_y(true_price, true_volume)
 
     total, parts = weighted_mse_loss(pred_price, pred_volume, true_y)
@@ -30,15 +31,15 @@ def test_direction_loss_off_by_default_matches_old_behavior():
 def test_direction_loss_penalizes_wrong_sign_more_than_right_sign():
     """true close_ret (open_ret+body_ret) is +0.01 (up) on every bar; a prediction with
     the same sign should score a lower direction_loss than one with the opposite sign."""
-    true_price = torch.zeros(1, 3, 4)
+    true_price = torch.zeros(1, HORIZON, 4)
     true_price[..., 1] = 0.01
-    true_volume = torch.zeros(1, 3)
+    true_volume = torch.zeros(1, HORIZON)
     true_y = _make_y(true_price, true_volume)
-    pred_volume = torch.zeros(1, 3)
+    pred_volume = torch.zeros(1, HORIZON)
 
-    pred_price_right = torch.zeros(1, 3, 4)
+    pred_price_right = torch.zeros(1, HORIZON, 4)
     pred_price_right[..., 1] = 0.01
-    pred_price_wrong = torch.zeros(1, 3, 4)
+    pred_price_wrong = torch.zeros(1, HORIZON, 4)
     pred_price_wrong[..., 1] = -0.01
 
     _, parts_right = weighted_mse_loss(pred_price_right, pred_volume, true_y, w_direction=1.0)
@@ -47,12 +48,12 @@ def test_direction_loss_penalizes_wrong_sign_more_than_right_sign():
 
 
 def test_direction_loss_disabled_does_not_affect_total_even_with_wrong_sign():
-    true_price = torch.zeros(1, 3, 4)
+    true_price = torch.zeros(1, HORIZON, 4)
     true_price[..., 1] = 0.01
-    true_volume = torch.zeros(1, 3)
+    true_volume = torch.zeros(1, HORIZON)
     true_y = _make_y(true_price, true_volume)
-    pred_volume = torch.zeros(1, 3)
-    pred_price_wrong = torch.zeros(1, 3, 4)
+    pred_volume = torch.zeros(1, HORIZON)
+    pred_price_wrong = torch.zeros(1, HORIZON, 4)
     pred_price_wrong[..., 1] = -0.01
 
     total, parts = weighted_mse_loss(pred_price_wrong, pred_volume, true_y, w_direction=0.0)
@@ -63,10 +64,10 @@ def test_direction_loss_disabled_does_not_affect_total_even_with_wrong_sign():
 def test_cvae_loss_forwards_direction_args():
     torch.manual_seed(0)
     batch, z_dim = 2, 4
-    pred_price = torch.randn(batch, 3, 4) * 0.01
-    pred_volume = torch.randn(batch, 3)
-    true_price = torch.randn(batch, 3, 4) * 0.01
-    true_volume = torch.randn(batch, 3)
+    pred_price = torch.randn(batch, HORIZON, 4) * 0.01
+    pred_volume = torch.randn(batch, HORIZON)
+    true_price = torch.randn(batch, HORIZON, 4) * 0.01
+    true_volume = torch.randn(batch, HORIZON)
     true_y = _make_y(true_price, true_volume)
     mu_q = torch.zeros(batch, z_dim)
     logvar_q = torch.zeros(batch, z_dim)
@@ -119,11 +120,11 @@ def test_weighted_nll_loss_matches_hand_computed_value_at_zero():
     terms (open_ret/body_ret) and 2 gaussian_nll(0,0,0) terms (wicks), per bar; vol_loss
     should be gaussian_nll(0,0,0)."""
     batch = 2
-    pred_price = torch.zeros(batch, 3, 4)
-    pred_price_logvar = torch.zeros(batch, 3, 4)
-    pred_volume = torch.zeros(batch, 3)
-    pred_vol_logvar = torch.zeros(batch, 3)
-    true_y = _make_y(torch.zeros(batch, 3, 4), torch.zeros(batch, 3))
+    pred_price = torch.zeros(batch, HORIZON, 4)
+    pred_price_logvar = torch.zeros(batch, HORIZON, 4)
+    pred_volume = torch.zeros(batch, HORIZON)
+    pred_vol_logvar = torch.zeros(batch, HORIZON)
+    true_y = _make_y(torch.zeros(batch, HORIZON, 4), torch.zeros(batch, HORIZON))
 
     laplace_term = laplace_nll(torch.zeros(1), torch.zeros(1), torch.zeros(1)).item()
     gaussian_term = gaussian_nll(torch.zeros(1), torch.zeros(1), torch.zeros(1)).item()
@@ -138,16 +139,16 @@ def test_weighted_nll_loss_matches_hand_computed_value_at_zero():
 
 def test_weighted_nll_loss_forwards_direction_args():
     """Same direction-loss behavior as weighted_mse_loss -- wrong sign scores worse."""
-    true_price = torch.zeros(1, 3, 4)
+    true_price = torch.zeros(1, HORIZON, 4)
     true_price[..., 1] = 0.01
-    true_y = _make_y(true_price, torch.zeros(1, 3))
-    pred_volume = torch.zeros(1, 3)
-    pred_vol_logvar = torch.zeros(1, 3)
-    pred_price_logvar = torch.zeros(1, 3, 4)
+    true_y = _make_y(true_price, torch.zeros(1, HORIZON))
+    pred_volume = torch.zeros(1, HORIZON)
+    pred_vol_logvar = torch.zeros(1, HORIZON)
+    pred_price_logvar = torch.zeros(1, HORIZON, 4)
 
-    pred_price_right = torch.zeros(1, 3, 4)
+    pred_price_right = torch.zeros(1, HORIZON, 4)
     pred_price_right[..., 1] = 0.01
-    pred_price_wrong = torch.zeros(1, 3, 4)
+    pred_price_wrong = torch.zeros(1, HORIZON, 4)
     pred_price_wrong[..., 1] = -0.01
 
     _, parts_right = weighted_nll_loss(
@@ -162,12 +163,12 @@ def test_weighted_nll_loss_forwards_direction_args():
 def test_cvae_loss_nll_mode_plumbs_logvar_through():
     torch.manual_seed(0)
     batch, z_dim = 2, 4
-    pred_price = torch.randn(batch, 3, 4) * 0.01
-    pred_price_logvar = torch.zeros(batch, 3, 4)
-    pred_volume = torch.randn(batch, 3)
-    pred_vol_logvar = torch.zeros(batch, 3)
-    true_price = torch.randn(batch, 3, 4) * 0.01
-    true_volume = torch.randn(batch, 3)
+    pred_price = torch.randn(batch, HORIZON, 4) * 0.01
+    pred_price_logvar = torch.zeros(batch, HORIZON, 4)
+    pred_volume = torch.randn(batch, HORIZON)
+    pred_vol_logvar = torch.zeros(batch, HORIZON)
+    true_price = torch.randn(batch, HORIZON, 4) * 0.01
+    true_volume = torch.randn(batch, HORIZON)
     true_y = _make_y(true_price, true_volume)
     mu_q = torch.zeros(batch, z_dim)
     logvar_q = torch.zeros(batch, z_dim)
@@ -188,9 +189,9 @@ def test_cvae_loss_nll_mode_plumbs_logvar_through():
 
 def test_cvae_loss_nll_mode_requires_logvar_args():
     batch, z_dim = 2, 4
-    pred_price = torch.zeros(batch, 3, 4)
-    pred_volume = torch.zeros(batch, 3)
-    true_y = _make_y(torch.zeros(batch, 3, 4), torch.zeros(batch, 3))
+    pred_price = torch.zeros(batch, HORIZON, 4)
+    pred_volume = torch.zeros(batch, HORIZON)
+    true_y = _make_y(torch.zeros(batch, HORIZON, 4), torch.zeros(batch, HORIZON))
     zeros_z = torch.zeros(batch, z_dim)
 
     with pytest.raises(ValueError):
@@ -202,9 +203,9 @@ def test_cvae_loss_nll_mode_requires_logvar_args():
 
 def test_cvae_loss_unknown_reconstruction_mode_raises():
     batch, z_dim = 2, 4
-    pred_price = torch.zeros(batch, 3, 4)
-    pred_volume = torch.zeros(batch, 3)
-    true_y = _make_y(torch.zeros(batch, 3, 4), torch.zeros(batch, 3))
+    pred_price = torch.zeros(batch, HORIZON, 4)
+    pred_volume = torch.zeros(batch, HORIZON)
+    true_y = _make_y(torch.zeros(batch, HORIZON, 4), torch.zeros(batch, HORIZON))
     zeros_z = torch.zeros(batch, z_dim)
 
     with pytest.raises(ValueError):

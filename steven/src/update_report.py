@@ -108,6 +108,11 @@ def vs_real_cell(model: dict) -> str:
     return f"{status} → sell {model['realized_price']:.2f} ({fmt_signed_bold_pct_value(model['realized_return_pct'])})"
 
 
+# PRE-PIVOT STRATEGY (steven4): hardcodes a 3-candle table, matching evaluate.py's
+# pre-pivot samples.json format (see the PRE-PIVOT note atop evaluate.py). Left as-is --
+# still valid for v1.md's existing report, which still describes the HORIZON=3 bracket-
+# order strategy -- but will need a real redesign (not a shape patch) once the rolling
+# hour-by-hour strategy (steven/rolling_hour_backtest.md) gets its own report section.
 def sample_section(s: dict) -> str:
     gt, pt, cvae = s["ground_truth"], s["patchtst"], s["cvae"]
     buy = s["buy_price"]

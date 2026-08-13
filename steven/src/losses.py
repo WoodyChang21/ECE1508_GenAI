@@ -9,14 +9,20 @@ import math
 import torch
 import torch.nn.functional as F
 
-from src.data_pipeline import per_bar_close_return
+from src.data_pipeline import HORIZON, per_bar_close_return
+
+N_PRICE = HORIZON * 4
 
 
 def unpack_y(y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """y: (B, 15) -> price components (B, 3, 4) [open_ret, body_ret, upper_wick,
-    lower_wick] per horizon bar, and volume (B, 3)."""
-    price = y[:, :12].reshape(-1, 3, 4)
-    volume = y[:, 12:15]
+    """y: (B, HORIZON*5) -> price components (B, HORIZON, 4) [open_ret, body_ret,
+    upper_wick, lower_wick] per horizon bar, and volume (B, HORIZON). Split width is
+    derived from HORIZON, not hardcoded -- see steven/rolling_hour_backtest.md for why
+    this project moved off a hardcoded 12/15 split (naive_periodic_benchmark's hardcoded
+    3-bar-block literal, found during the steven4 migration audit, silently diverging
+    from HORIZON is exactly the failure mode this guards against)."""
+    price = y[:, :N_PRICE].reshape(-1, HORIZON, 4)
+    volume = y[:, N_PRICE : N_PRICE + HORIZON]
     return price, volume
 
 
@@ -54,7 +60,7 @@ def weighted_mse_loss(
 
     direction_loss = pred_price.new_tensor(0.0)
     if w_direction > 0:
-        pred_close_ret = per_bar_close_return(pred_price)  # (B, 3), real log-return scale
+        pred_close_ret = per_bar_close_return(pred_price)  # (B, HORIZON), real log-return scale
         true_close_ret = per_bar_close_return(true_price)
         target_up = (true_close_ret > 0).float()
         direction_loss = F.binary_cross_entropy_with_logits(
@@ -118,7 +124,7 @@ def weighted_nll_loss(
 
     direction_loss = pred_price.new_tensor(0.0)
     if w_direction > 0:
-        pred_close_ret = per_bar_close_return(pred_price)  # (B, 3), real log-return scale
+        pred_close_ret = per_bar_close_return(pred_price)  # (B, HORIZON), real log-return scale
         true_close_ret = per_bar_close_return(true_price)
         target_up = (true_close_ret > 0).float()
         direction_loss = F.binary_cross_entropy_with_logits(

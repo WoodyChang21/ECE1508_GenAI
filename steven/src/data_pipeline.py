@@ -37,7 +37,8 @@ PRICE_VOL_IDX = [0, 1, 2, 3, 4]  # zeroed at horizon positions in the masked ten
 
 CONTEXT_LENGTHS = [14, 21, 28, 35, 42, 49, 56, 63, 70]  # 2..10 trading days, step 7 (1 day = 7 bars)
 MAX_CONTEXT = 70
-HORIZON = 3
+HORIZON = 1  # steven4 pivot: predict one candle at a time for the rolling hour-by-hour backtest,
+# not 3 at once for a fixed bracket order -- see steven/rolling_hour_backtest.md.
 
 # Hard cap on predicted per-bar log-return components (open_ret, body_ret, wicks).
 # Training data's most extreme single hourly bar ever seen is open_ret=0.116 (p99.9 is
@@ -296,10 +297,19 @@ class RollingWindowSampler:
 def build_window(
     feat: np.ndarray, opens: np.ndarray, closes: np.ndarray, start_idx: int, ctx_bars: int
 ) -> dict:
-    """Materializes one 73-slot x 9-channel padded window.
+    """Materializes one (MAX_CONTEXT+HORIZON)-slot x N_CHANNELS-channel padded window.
 
     feat: (N, 7) chained feature matrix in FEATURE_COLS order.
-    opens/closes: (N,) raw prices, used for the close_0 anchor correction.
+    opens/closes: (N,) raw prices. `opens` is unused here at HORIZON=1 (kept in the
+    signature for call-site stability -- see the HORIZON=1 note below); `closes` still
+    anchors close_0.
+
+    HORIZON=1 (steven4): no cross-horizon-bar anchor correction is needed -- bar 0's
+    open_ret is already correctly anchored to close_0 via the chaining in feature
+    construction. (Pre-steven4, when HORIZON=3, bars 1/2 (0-indexed) needed their
+    open_ret re-anchored to close_0 instead of the previous, model-predicted-at-inference
+    horizon bar's close -- that correction only exists when there's more than one
+    horizon bar to chain across.)
     """
     ctx_end = start_idx + ctx_bars
     hz_end = ctx_end + HORIZON
@@ -308,12 +318,6 @@ def build_window(
     horizon_feats_true = feat[ctx_end:hz_end].copy()
 
     close_0 = float(closes[ctx_end - 1])
-
-    # Anchor correction: horizon bars 2 & 3 (0-indexed 1, 2) need open_ret relative to
-    # close_0, not chained to the previous horizon bar's (model-predicted, at inference)
-    # close. body_ret/upper_wick/lower_wick are anchor-invariant and need no correction.
-    for i in (1, 2):
-        horizon_feats_true[i, 0] = np.log(opens[ctx_end + i] / close_0)
 
     pad_len = MAX_CONTEXT - ctx_bars
     padded_context = np.zeros((MAX_CONTEXT, N_FEATURE_CHANNELS), dtype=np.float32)
@@ -335,7 +339,7 @@ def build_window(
 
     y = np.concatenate(
         [horizon_feats_true[:, :4].reshape(-1), horizon_feats_true[:, 4]]
-    ).astype(np.float32)  # 12 price components (3 bars x 4) + 3 volume values
+    ).astype(np.float32)  # HORIZON*4 price components + HORIZON volume values (HORIZON=1: 4+1=5)
 
     return {
         "masked_tensor": masked_tensor.astype(np.float32),
@@ -415,8 +419,9 @@ def max_close_from_components(components: np.ndarray, close_0) -> np.ndarray:
 
 
 def per_bar_close_return(components: np.ndarray) -> np.ndarray:
-    """components: (..., 3, 4). Returns (..., 3): close_0-anchored close return
-    (open_ret + body_ret) per horizon bar -- used to check directional coherence."""
+    """components: (..., HORIZON, 4). Returns (..., HORIZON): close_0-anchored close
+    return (open_ret + body_ret) per horizon bar -- used to check directional coherence.
+    Shape-generic (numpy or torch) -- works unchanged for any HORIZON."""
     return components[..., 0] + components[..., 1]
 
 

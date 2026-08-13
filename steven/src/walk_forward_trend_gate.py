@@ -1,4 +1,22 @@
-"""Re-runs evaluate.py's walk-forward backtest (orphaned since "evaluate.py: replace the
+"""PRE-PIVOT STRATEGY (steven4): this script re-runs evaluate.py's fixed-HORIZON-bar
+bracket-order walk-forward (see the PRE-PIVOT note atop evaluate.py). Its own logic is
+HORIZON-agnostic (delegates entirely to evaluate.py's now-HORIZON=1-safe functions), but it
+still can't run against any checkpoint saved BEFORE the steven4 migration (cvae_checkpoint.pt,
+cvae_checkpoint_generative.pt, etc.): CVAEInpainting's decoder width is derived from the
+current *global* HORIZON constant at construction time, not saved per-checkpoint, so
+`cvae.load_state_dict(...)` against an old (HORIZON=3, decoder width 30) checkpoint's
+state dict will now raise a size-mismatch error against the newly-constructed
+(HORIZON=1, decoder width 10) model, the same failure mode as a wrong in_channels. This
+isn't fixable without either retraining every existing checkpoint at HORIZON=1 or making
+HORIZON an instance parameter instead of a module constant (out of scope for steven4) --
+check out steven3 (or an earlier steven4 commit, before the migration) to re-run this
+script against those older checkpoints. Kept here, not deleted, because it's the exact
+script that produced the results already written up in
+generative_checkpoint_uptrend_gate.md; the active strategy going forward is the rolling
+hour-by-hour hold in src/rolling_backtest.py/src/rolling_trend_backtest.py (see
+steven/rolling_hour_backtest.md), evaluated against a freshly-trained HORIZON=1 checkpoint.
+
+Re-runs evaluate.py's walk-forward backtest (orphaned since "evaluate.py: replace the
 backtest with a chart-only scenario comparison" -- main() there only renders scenario
 charts now) against a given CVAE checkpoint, once unrestricted and once with trades gated
 to only fire when the trailing context is classified "uptrend" (or whichever labels are

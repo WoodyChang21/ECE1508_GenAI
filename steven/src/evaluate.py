@@ -11,6 +11,21 @@ comparison is reported here (see random_sample_stats). The walk-forward backtest
 replaced (run_walk_forward/walk_forward_stats/make_plots below) stays in this file, unused by
 main() by default, in case a sequential/compounding evaluation is wanted again later.
 
+PRE-PIVOT STRATEGY, kept for history/v1.md only (steven4): bracket_exit/run_walk_forward/
+make_cvae_predict_fn/make_patchtst_predict_fn/classify_walk_forward_decision/make_plots/
+naive_periodic_benchmark below all assume a fixed HORIZON-bar bracket order (buy, place a
+take-profit/stop-loss, walk exactly HORIZON real bars, see which fills first). steven4
+replaced this *strategy* with a rolling hour-by-hour hold (see src/rolling_backtest.py and
+steven/rolling_hour_backtest.md) that predicts and re-predicts one candle at a time and
+holds open-endedly rather than for a fixed window -- the bracket-order *design* here is not
+being carried forward. Its mechanical bugs found during the steven4 migration audit
+(several literal-3/12/15 shape and cadence assumptions that didn't derive from HORIZON --
+naive_periodic_benchmark's trade-block width, run_walk_forward's y-unpack, make_plots'/
+make_random_sample_plots' plotted-region width) WERE fixed, so this file still loads and
+runs correctly against a HORIZON=1 checkpoint and stays testable -- but the strategy design
+itself (fixed-width bracket order vs. open-ended rolling hold) was deliberately not
+redesigned here; that redesign lives in rolling_backtest.py instead.
+
 Usage:
     python steven/src/evaluate.py \\
         --patchtst-checkpoint steven/outputs/patchtst_checkpoint.pt \\
@@ -60,6 +75,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefm
 logger = logging.getLogger(__name__)
 
 WALK_FORWARD_CTX_BARS = MAX_CONTEXT  # 70 -- see the walk-forward module note below
+N_PRICE = HORIZON * 4  # open_ret, body_ret, upper_wick, lower_wick, per horizon bar -- w["y"]'s price prefix width
 
 
 def parse_args() -> argparse.Namespace:
@@ -279,20 +295,27 @@ def buy_and_hold_benchmark(df: pd.DataFrame, entry_idx: int, exit_idx: int) -> d
 
 
 def naive_periodic_benchmark(df: pd.DataFrame, closes: np.ndarray, t0: int, test_hi: int) -> dict:
-    """No model, no signal: tiles the test range in non-overlapping 3-bar (HORIZON) blocks
+    """No model, no signal: tiles the test range in non-overlapping HORIZON-bar blocks
     starting right after t0 (the same anchor the walk-forward strategies use) -- buy at the
-    close of each block's 1st bar, sell at the close of its 3rd, then immediately start the
-    next block (buy(t0+1)/sell(t0+3), buy(t0+4)/sell(t0+6), ...). Always trades, every
-    block, unconditionally -- no take-profit target, no confidence gate, no expiry logic.
-    Same trade cadence/shape as the walk-forward strategies (one round trip per
-    HORIZON-bar block) but zero selectivity, to check whether the models' confidence-gated
-    entries actually beat blind periodic exposure to the same instrument. Equity compounds
-    block to block, same as run_walk_forward."""
+    close of each block's 1st bar, sell at the close of its last, then immediately start
+    the next block. Always trades, every block, unconditionally -- no take-profit target,
+    no confidence gate, no expiry logic. Same trade cadence/shape as the walk-forward
+    strategies (one round trip per HORIZON-bar block) but zero selectivity, to check
+    whether the models' confidence-gated entries actually beat blind periodic exposure to
+    the same instrument. Equity compounds block to block, same as run_walk_forward.
+
+    Derived from HORIZON, not hardcoded to 3 -- a hardcoded literal here would silently
+    stop matching the walk-forward strategies' own cadence the moment HORIZON changes,
+    exactly the failure mode found (and fixed) during the steven4 HORIZON=1 migration
+    audit. At HORIZON=1 this degenerates to buying and selling at the same bar's close
+    every block (0 return per block, by construction) -- an honest reflection of what
+    "same cadence as a 1-bar strategy" means, not a bug."""
     equity = 1.0
     trades: list[dict] = []
     k = 0
     while True:
-        buy_idx, sell_idx = t0 + 3 * k + 1, t0 + 3 * k + 3
+        buy_idx = t0 + HORIZON * k + 1
+        sell_idx = buy_idx + HORIZON - 1
         if sell_idx >= test_hi:
             break
         buy_price, sell_price = float(closes[buy_idx]), float(closes[sell_idx])
@@ -456,7 +479,7 @@ def run_walk_forward(
     while start_idx + WALK_FORWARD_CTX_BARS + HORIZON <= test_hi:
         w = build_window(feat, opens, closes, start_idx, WALK_FORWARD_CTX_BARS)
         close_0 = w["close_0"]
-        true_price = w["y"][:12].reshape(1, 3, 4)
+        true_price = w["y"][:N_PRICE].reshape(1, HORIZON, 4)
         true_ohlc = reconstruct_prices(true_price, np.array([close_0]))[0]
 
         pred = predict_fn(w)
@@ -554,7 +577,7 @@ def run_random_sample_backtest(
     for start_idx, ctx_bars in test_pairs:
         w = build_window(feat, opens, closes, start_idx, ctx_bars)
         close_0 = w["close_0"]
-        true_price = w["y"][:12].reshape(1, 3, 4)
+        true_price = w["y"][:N_PRICE].reshape(1, HORIZON, 4)
         true_ohlc = reconstruct_prices(true_price, np.array([close_0]))[0]
 
         pred = predict_fn(w)
@@ -953,11 +976,11 @@ def make_plots(df: pd.DataFrame, pt_decisions: list[dict], cvae_decisions: list[
 
         ctx_tail = min(ctx_bars, 20)
         hz_start = start_idx + ctx_bars
-        plot_rows = df.iloc[hz_start - ctx_tail : hz_start + 3]
+        plot_rows = df.iloc[hz_start - ctx_tail : hz_start + HORIZON]
         true_df = plot_rows.set_index("datetime")[["open", "high", "low", "close", "volume"]]
 
         cvae_df = true_df.copy()
-        cvae_df.loc[cvae_df.index[-3:], ohlc_cols] = cvae_ohlc
+        cvae_df.loc[cvae_df.index[-HORIZON:], ohlc_cols] = cvae_ohlc
 
         true_horizon_ohlc = true_df.iloc[-HORIZON:][["open", "high", "low", "close"]].to_numpy()
 
@@ -978,7 +1001,7 @@ def make_plots(df: pd.DataFrame, pt_decisions: list[dict], cvae_decisions: list[
             pt_tp = pt_d["take_profit"]
             pt_ohlc = reconstruct_prices(pt_d["price"], buy_price)  # (3,4)
             pt_df = true_df.copy()
-            pt_df.loc[pt_df.index[-3:], ohlc_cols] = pt_ohlc
+            pt_df.loc[pt_df.index[-HORIZON:], ohlc_cols] = pt_ohlc
             pt_sell_targets = [("PatchTST TP", pt_tp, "tab:orange", "-")]
             if stop_loss is not None:
                 pt_sell_targets.append(("PatchTST SL", stop_loss, "tab:red", ":"))
@@ -1111,11 +1134,11 @@ def make_random_sample_plots(df: pd.DataFrame, pt_decisions: list[dict], cvae_de
 
             ctx_tail = min(ctx_bars, 20)
             hz_start = start_idx + ctx_bars
-            plot_rows = df.iloc[hz_start - ctx_tail : hz_start + 3]
+            plot_rows = df.iloc[hz_start - ctx_tail : hz_start + HORIZON]
             true_df = plot_rows.set_index("datetime")[["open", "high", "low", "close", "volume"]]
 
             cvae_df = true_df.copy()
-            cvae_df.loc[cvae_df.index[-3:], ohlc_cols] = cvae_ohlc
+            cvae_df.loc[cvae_df.index[-HORIZON:], ohlc_cols] = cvae_ohlc
 
             true_horizon_ohlc = true_df.iloc[-HORIZON:][["open", "high", "low", "close"]].to_numpy()
 
@@ -1129,7 +1152,7 @@ def make_random_sample_plots(df: pd.DataFrame, pt_decisions: list[dict], cvae_de
             pt_tp = pt_d["take_profit"]
             pt_ohlc = reconstruct_prices(pt_d["price"], buy_price)  # (3,4)
             pt_df = true_df.copy()
-            pt_df.loc[pt_df.index[-3:], ohlc_cols] = pt_ohlc
+            pt_df.loc[pt_df.index[-HORIZON:], ohlc_cols] = pt_ohlc
             pt_sell_targets = [("PatchTST TP", pt_tp, "tab:orange", "-")]
             if stop_loss is not None:
                 pt_sell_targets.append(("PatchTST SL", stop_loss, "tab:red", ":"))

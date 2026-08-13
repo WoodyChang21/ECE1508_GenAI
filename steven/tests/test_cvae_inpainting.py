@@ -1,6 +1,6 @@
 import torch
 
-from src.data_pipeline import MAX_LOG_RETURN, N_CHANNELS, TOTAL_LEN
+from src.data_pipeline import HORIZON, MAX_LOG_RETURN, N_CHANNELS, TOTAL_LEN
 from src.models.cvae_inpainting import CVAEInpainting
 
 
@@ -20,10 +20,10 @@ def test_default_decoder_ctx_dim_matches_old_behavior():
 
     masked_tensor, full_tensor = _dummy_batch()
     price, price_logvar, volume, vol_logvar, mu_p, logvar_p, mu_q, logvar_q = model(masked_tensor, full_tensor)
-    assert price.shape == (3, 3, 4)
-    assert price_logvar.shape == (3, 3, 4)
-    assert volume.shape == (3, 3)
-    assert vol_logvar.shape == (3, 3)
+    assert price.shape == (3, HORIZON, 4)
+    assert price_logvar.shape == (3, HORIZON, 4)
+    assert volume.shape == (3, HORIZON)
+    assert vol_logvar.shape == (3, HORIZON)
 
 
 def test_decoder_ctx_dim_bottlenecks_decoder_input():
@@ -33,13 +33,13 @@ def test_decoder_ctx_dim_bottlenecks_decoder_input():
 
     masked_tensor, full_tensor = _dummy_batch()
     price, price_logvar, volume, vol_logvar, mu_p, logvar_p, mu_q, logvar_q = model(masked_tensor, full_tensor)
-    assert price.shape == (3, 3, 4)
-    assert volume.shape == (3, 3)
+    assert price.shape == (3, HORIZON, 4)
+    assert volume.shape == (3, HORIZON)
 
     k = 5
     sample_price, sample_volume = model.sample(masked_tensor, k=k)
-    assert sample_price.shape == (k, 3, 3, 4)
-    assert sample_volume.shape == (k, 3, 3)
+    assert sample_price.shape == (k, 3, HORIZON, 4)
+    assert sample_volume.shape == (k, 3, HORIZON)
 
 
 def test_prior_head_still_sees_full_ctx_dim_when_bottlenecked():
@@ -51,9 +51,9 @@ def test_prior_head_still_sees_full_ctx_dim_when_bottlenecked():
 
 
 def test_decoder_output_width_doubled_for_mean_and_logvar():
-    """30, not 15: one (mean, logvar) pair per component."""
+    """2*(HORIZON*5), not HORIZON*5: one (mean, logvar) pair per component."""
     model = CVAEInpainting(hidden=8, ctx_dim=16, z_dim=4, decoder_hidden=32)
-    assert model.decoder[-1].out_features == 30
+    assert model.decoder[-1].out_features == 2 * (HORIZON * 5)
 
 
 def test_price_logvar_stays_within_configured_range():

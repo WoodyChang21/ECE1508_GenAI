@@ -1,0 +1,37 @@
+seed: 42
+device: auto  # auto | cpu | mps | cuda
+data_path: steven/data/spy_ohlcv_1h.parquet
+
+# steven4 pivot: identical recipe to configs/patchtst_hourly_momentum.yaml, trained
+# against HORIZON=1 (see src/data_pipeline.py) instead of HORIZON=3 -- PatchTST's head
+# width now derives from HORIZON automatically (src/models/patchtst.py), so no model-shape
+# fields change here. Kept alongside the CVAE retrain so v1.md's PatchTST-vs-CVAE
+# comparison still has a matching-shaped benchmark checkpoint; not otherwise used by the
+# new rolling hour-by-hour strategy (src/rolling_backtest.py), which is CVAE-only.
+momentum_features:
+  enabled: true
+  vix_data_path: steven/data/vix_daily_yfinance.parquet
+
+model:
+  d_model: 64
+  nhead: 4
+  num_layers: 3
+  dim_feedforward: 128
+  dropout: 0.1
+
+loss:
+  w_price: 1.0
+  w_vol: 0.5
+
+train:
+  max_epochs: 20
+  train_windows_per_epoch: 20000
+  windows_per_eval_set: 3000
+  batch_size: 512
+  lr: 0.0006
+  weight_decay: 0.0001
+  num_workers: 0
+  pin_memory: true
+
+output:
+  checkpoint_path: steven/outputs/patchtst_checkpoint_h1.pt

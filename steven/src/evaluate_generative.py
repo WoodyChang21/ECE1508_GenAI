@@ -115,13 +115,14 @@ def main() -> None:
         len(pairs), args.ctx_bars, args.split, args.k, "nll" if is_nll else "mse",
     )
 
+    n_price = dp.HORIZON * 4
     windows = [build_window(feat, opens, closes, s, c) for s, c in pairs]
     masked = torch.from_numpy(np.stack([w["masked_tensor"] for w in windows])).to(device)
-    true_price = np.stack([w["y"][:12].reshape(3, 4) for w in windows])  # (N,3,4)
-    true_volume = np.stack([w["y"][12:15] for w in windows])  # (N,3)
+    true_price = np.stack([w["y"][:n_price].reshape(dp.HORIZON, 4) for w in windows])  # (N,HORIZON,4)
+    true_volume = np.stack([w["y"][n_price : n_price + dp.HORIZON] for w in windows])  # (N,HORIZON)
 
     with torch.no_grad():
-        price_samples_t, vol_samples_t = cvae.sample(masked, k=args.k)  # (K,N,3,4), (K,N,3)
+        price_samples_t, vol_samples_t = cvae.sample(masked, k=args.k)  # (K,N,HORIZON,4), (K,N,HORIZON)
     price_samples = price_samples_t.cpu().numpy()
     vol_samples = vol_samples_t.cpu().numpy()
 
@@ -129,7 +130,7 @@ def main() -> None:
     train_lo, train_hi = bounds["train"]
 
     per_component = {}
-    for bar in range(3):
+    for bar in range(dp.HORIZON):
         for ci, comp in enumerate(COMPONENT_NAMES):
             samples = price_samples[:, :, bar, ci]  # (K,N)
             y = true_price[:, bar, ci]
@@ -141,7 +142,7 @@ def main() -> None:
                 "crps": float(crps_from_samples(samples, y).mean()),
                 "extreme_rank_fraction": extreme_rank_fraction(rank_histogram(samples, y, rng=rng), k=args.k),
             }
-    for bar in range(3):
+    for bar in range(dp.HORIZON):
         samples = vol_samples[:, :, bar]
         y = true_volume[:, bar]
         div = diversity_stats(samples)
@@ -173,7 +174,7 @@ def main() -> None:
     high_mask = realized_vols >= high_thresh
 
     context_sensitivity = {}
-    for bar in range(3):
+    for bar in range(dp.HORIZON):
         for ci, comp in enumerate(COMPONENT_NAMES):
             y = true_price[:, bar, ci]
             gen_mean = price_samples[:, :, bar, ci].mean(axis=0)  # (N,) per-window model mean
@@ -209,7 +210,7 @@ def main() -> None:
         price_mean_np = price_mean.cpu().numpy()
         price_logvar_np = price_logvar.cpu().numpy()
         calibration = {}
-        for bar in range(3):
+        for bar in range(dp.HORIZON):
             for ci, comp in enumerate(COMPONENT_NAMES):
                 pit = pit_values(
                     true_price[:, bar, ci], price_mean_np[:, bar, ci], price_logvar_np[:, bar, ci],

@@ -21,7 +21,10 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from src.data_pipeline import MAX_LOG_RETURN, N_CHANNELS
+from src.data_pipeline import HORIZON, MAX_LOG_RETURN, N_CHANNELS
+
+N_PRICE = HORIZON * 4  # open_ret, body_ret, upper_wick, lower_wick, per horizon bar
+N_TARGET = N_PRICE + HORIZON  # + volume, per horizon bar
 
 
 class ConvEncoder(nn.Module):
@@ -107,13 +110,16 @@ class CVAEInpainting(nn.Module):
         # saved config dict) still load correctly.
         self.ctx_dropout = nn.Dropout(ctx_dropout)
 
-        # 30, not 15: one (mean, logvar) pair per component -- see decode()'s docstring.
+        # 2*N_TARGET, not N_TARGET: one (mean, logvar) pair per component -- see decode()'s
+        # docstring. Derived from HORIZON (N_TARGET), not hardcoded, since a hardcoded
+        # width here is exactly the shape mismatch that would silently corrupt training
+        # if HORIZON ever changes again without this line changing with it.
         self.decoder = nn.Sequential(
             nn.Linear(z_dim + self.decoder_ctx_dim, decoder_hidden),
             nn.ReLU(),
             nn.Linear(decoder_hidden, decoder_hidden),
             nn.ReLU(),
-            nn.Linear(decoder_hidden, 30),
+            nn.Linear(decoder_hidden, 2 * N_TARGET),
         )
 
     def encode_prior(self, masked_tensor: torch.Tensor):
@@ -164,7 +170,7 @@ class CVAEInpainting(nn.Module):
         raw = self.decoder(torch.cat([z, ctx_repr], dim=-1))
         raw_mean, raw_logvar = raw.chunk(2, dim=-1)  # same idiom as prior_head/recognition_head
 
-        price_raw = raw_mean[:, :12].reshape(-1, 3, 4)
+        price_raw = raw_mean[:, :N_PRICE].reshape(-1, HORIZON, 4)
         # Bounded to +-MAX_LOG_RETURN (open_ret/body_ret) or [0, MAX_LOG_RETURN] (wicks)
         # so an undertrained/unstable head can't blow up into unrealistic price moves.
         open_ret = MAX_LOG_RETURN * torch.tanh(price_raw[..., 0])
@@ -172,10 +178,10 @@ class CVAEInpainting(nn.Module):
         upper_wick = MAX_LOG_RETURN * torch.sigmoid(price_raw[..., 2])
         lower_wick = MAX_LOG_RETURN * torch.sigmoid(price_raw[..., 3])
         price = torch.stack([open_ret, body_ret, upper_wick, lower_wick], dim=-1)
-        volume = raw_mean[:, 12:15]
+        volume = raw_mean[:, N_PRICE:N_TARGET]
 
-        price_logvar = self._bounded_logvar(raw_logvar[:, :12].reshape(-1, 3, 4), self.price_logvar_range)
-        vol_logvar = self._bounded_logvar(raw_logvar[:, 12:15], self.vol_logvar_range)
+        price_logvar = self._bounded_logvar(raw_logvar[:, :N_PRICE].reshape(-1, HORIZON, 4), self.price_logvar_range)
+        vol_logvar = self._bounded_logvar(raw_logvar[:, N_PRICE:N_TARGET], self.vol_logvar_range)
         return price, price_logvar, volume, vol_logvar
 
     def forward(self, masked_tensor: torch.Tensor, full_tensor: torch.Tensor):
@@ -190,8 +196,8 @@ class CVAEInpainting(nn.Module):
 
     @torch.no_grad()
     def sample(self, masked_tensor: torch.Tensor, k: int = 5, sample_noise: bool = True):
-        """Inference: only the prior network + decoder run. Returns price (K,B,3,4),
-        volume (K,B,3).
+        """Inference: only the prior network + decoder run. Returns price (K,B,HORIZON,4),
+        volume (K,B,HORIZON).
 
         sample_noise: when True (default), each draw adds calibrated aleatoric noise on
         top of its z-conditioned mean (price_mean + eps*exp(0.5*price_logvar), same for

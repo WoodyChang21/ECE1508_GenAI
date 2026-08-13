@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data_pipeline import (
     FEATURE_COLS,
+    HORIZON,
     MAX_CONTEXT,
     build_dataset,
     build_window,
@@ -118,7 +119,7 @@ def main() -> None:
     test_lo, test_hi = bounds["test"]
 
     rng = np.random.default_rng(args.seed)
-    last_valid_start = test_hi - MAX_CONTEXT - 3
+    last_valid_start = test_hi - MAX_CONTEXT - HORIZON
     starts = rng.choice(np.arange(test_lo, last_valid_start), size=args.num_windows, replace=False)
 
     body_ret_draws = []  # (N, K)
@@ -131,7 +132,7 @@ def main() -> None:
             masked_t = torch.from_numpy(w["masked_tensor"])[None].to(device)
             close_0 = np.array([w["close_0"]])
 
-            price_t, _ = cvae.sample(masked_t, k=args.num_samples)  # (K,1,3,4)
+            price_t, _ = cvae.sample(masked_t, k=args.num_samples)  # (K,1,HORIZON,4)
             price = shrink_components(price_t.cpu().numpy(), sell_bound)
             body_ret_draws.append(price[:, 0, 0, 1])  # bar 0's body_ret, all K draws
 

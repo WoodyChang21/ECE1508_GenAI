@@ -1,0 +1,58 @@
+seed: 42
+device: auto  # auto | cpu | mps | cuda
+data_path: steven/data/spy_ohlcv_1h.parquet
+
+# steven4 pivot: identical recipe to configs/cvae_generative.yaml (the current best --
+# NLL reconstruction, momentum+VIX, decoder_ctx_dim -- none of that is being revisited
+# here), but trained against HORIZON=1 (see src/data_pipeline.py) instead of HORIZON=3.
+# The model architecture itself (CVAEInpainting) now derives its decoder's output width
+# from HORIZON automatically, so no model-shape fields change here -- this config differs
+# from cvae_generative.yaml ONLY in output.checkpoint_path. See
+# steven/rolling_hour_backtest.md for what this checkpoint is evaluated against
+# (src/rolling_trend_backtest.py's hour-by-hour rolling hold, not the old bracket-order
+# walk-forward).
+momentum_features:
+  enabled: true
+  vix_data_path: steven/data/vix_daily_yfinance.parquet
+
+model:
+  hidden: 32
+  ctx_dim: 64
+  z_dim: 8
+  decoder_hidden: 128
+  ctx_dropout: 0.3
+  decoder_ctx_dim: 8
+  # price_logvar_range / vol_logvar_range: left at CVAEInpainting's own defaults
+  # ((-14,-6) / (-6,3)) -- see src/models/cvae_inpainting.py's constructor docstring for
+  # the reasoning behind those specific bounds.
+
+loss:
+  w_price: 1.0
+  w_vol: 0.5
+  use_price_scale: true  # ignored when reconstruction=nll (see train_cvae.py) -- kept
+                          # here only for schema consistency with the other configs.
+  kl_cycles: 3
+  kl_ramp_fraction: 0.5
+  free_bits: 0.15
+  w_direction: 0.0
+  direction_temperature: 0.003
+  reconstruction: nll
+  nll_warmup_epochs: 5  # train mean-only (plain MSE) this many epochs before switching to
+                         # NLL -- mitigates the classic "inflate variance instead of
+                         # improving the mean" pathology (Nix & Weigend 1994).
+
+train:
+  max_epochs: 30
+  train_windows_per_epoch: 20000
+  windows_per_eval_set: 3000
+  batch_size: 512
+  lr: 0.0006
+  weight_decay: 0.0001
+  num_workers: 0
+  pin_memory: true
+
+inference:
+  num_samples: 5
+
+output:
+  checkpoint_path: steven/outputs/cvae_checkpoint_h1.pt
