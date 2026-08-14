@@ -1,0 +1,90 @@
+{
+  "checkpoint": "steven/outputs/cvae_checkpoint_h1.pt",
+  "reconstruction": "nll",
+  "n_windows": 2399,
+  "ctx_bars": 70,
+  "k": 32,
+  "split": "test",
+  "per_component": {
+    "bar0_open_ret": {
+      "diversity_std": 0.001094853738322854,
+      "diversity_pairwise": 0.0012650050921365619,
+      "variance_ratio": 0.16258994658254125,
+      "crps": 0.000881385407410562,
+      "extreme_rank_fraction": 0.08378491037932471
+    },
+    "bar0_body_ret": {
+      "diversity_std": 0.0018465837929397821,
+      "diversity_pairwise": 0.002132854424417019,
+      "variance_ratio": 0.3496533099530976,
+      "crps": 0.0015579399187117815,
+      "extreme_rank_fraction": 0.13005418924551895
+    },
+    "bar0_upper_wick": {
+      "diversity_std": 0.0007120847585611045,
+      "diversity_pairwise": 0.000748601567465812,
+      "variance_ratio": 0.3777585876630894,
+      "crps": 0.0005424998817034066,
+      "extreme_rank_fraction": 0.062109212171738225
+    },
+    "bar0_lower_wick": {
+      "diversity_std": 0.0007960358052514493,
+      "diversity_pairwise": 0.0008453370537608862,
+      "variance_ratio": 0.42325153132227294,
+      "crps": 0.0006036128615960479,
+      "extreme_rank_fraction": 0.06877865777407254
+    },
+    "bar0_volume": {
+      "diversity_std": 0.5908249616622925,
+      "diversity_pairwise": 0.6828645467758179,
+      "variance_ratio": 0.29425644339679335,
+      "crps": 0.4210042655467987,
+      "extreme_rank_fraction": 0.06794497707378074
+    }
+  },
+  "crps_skill_score_bar0_body_ret": -0.02434732369725756,
+  "context_sensitivity_realized_vol_tercile": {
+    "bar0_open_ret": {
+      "effect_ratio_mean": 0.5324118985169352,
+      "effect_ratio_spread": 0.029052088745050837
+    },
+    "bar0_body_ret": {
+      "effect_ratio_mean": 0.0881637072329437,
+      "effect_ratio_spread": 0.09558993226105332
+    },
+    "bar0_upper_wick": {
+      "effect_ratio_mean": 0.15772227679680928,
+      "effect_ratio_spread": 0.10704172824707041
+    },
+    "bar0_lower_wick": {
+      "effect_ratio_mean": 0.24187717116302104,
+      "effect_ratio_spread": 0.13842345871088965
+    }
+  },
+  "calibration_coverage": {
+    "bar0_open_ret": {
+      "0.5": 0.3280533555648187,
+      "0.8": 0.8978741142142559,
+      "0.9": 0.9082951229679033,
+      "0.95": 0.924968736973739
+    },
+    "bar0_body_ret": {
+      "0.5": 0.3834931221342226,
+      "0.8": 0.7169654022509379,
+      "0.9": 0.8395164651938307,
+      "0.95": 0.901625677365569
+    },
+    "bar0_upper_wick": {
+      "0.5": 0.669445602334306,
+      "0.8": 0.882034180908712,
+      "0.9": 0.9420591913297207,
+      "0.95": 0.9641517298874531
+    },
+    "bar0_lower_wick": {
+      "0.5": 0.6177573989162151,
+      "0.8": 0.8507711546477699,
+      "0.9": 0.9258024176740308,
+      "0.95": 0.9616506877865777
+    }
+  }
+}
