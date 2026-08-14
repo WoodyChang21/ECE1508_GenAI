@@ -1,36 +1,48 @@
-# steven4
+# steven4 — CVAE
 
-CVAE-based candle generation for SPY, framed as image inpainting: block out the next
-candle and train a model to reconstruct it from what came before. This branch is a
-pivot from `steven3` — see below for what changed.
+Conditional VAE that generates SPY candles via image-inpainting-style reconstruction:
+block out the next candle and train a model to reconstruct it from what came before.
 
-## What's different from steven3
+## Data
 
-- **Predicts one candle at a time (`HORIZON=1`), not three.** The model, loss, and data
-  pipeline all changed shape accordingly.
-- **New backtest**: instead of a fixed bracket order (buy, take-profit/stop-loss, hold
-  exactly 3 bars), the strategy now re-predicts every real hour and holds open-endedly —
-  buy on an "uptrend" call, sell on a real-price loss, a "downtrend" call, or a hard 1%
-  stop-loss.
-- Old `steven3` checkpoints (`cvae_checkpoint.pt`, etc.) **no longer load** on this
-  branch — the model's shapes changed. Use `steven3` if you need those.
+- SPY hourly OHLCV, reparametrized into log-return features: `open_ret`, `body_ret`,
+  `upper_wick`, `lower_wick`, `log_volume_norm`.
+- Optional momentum features (enabled in the current config): EMA9/EMA21 crossover,
+  RSI-14, VIX (previous day's close).
 
-## Key files
+## Model
 
-- `src/models/cvae_inpainting.py` — the CVAE architecture.
-- `src/rolling_backtest.py` — the new backtest's decision logic.
-- `configs/cvae_h1.yaml` — training config for the current model.
-- `colab_train_h1.ipynb` — train on Colab, then run the backtest, then sync results back
-  to GitHub. This is the notebook to run.
-- `rolling_hour_backtest.md` — the full writeup: exact backtest mechanics, what's been
-  verified vs. not, and a caveat worth reading before trusting any result (the trade
-  signal re-tests something already found harmful in an earlier version of this project).
+- Conditional VAE — `src/models/cvae_inpainting.py`.
+- Training config — `configs/cvae_h1.yaml`.
+- Predicts one candle at a time (`HORIZON=1`).
 
-## Quick start
+## Outputs
 
-Open `colab_train_h1.ipynb` on a Colab GPU runtime and run the cells top to bottom —
-clones this branch, trains the CVAE, runs the backtest, prints the headline numbers.
+- `outputs/cvae_checkpoint_h1.pt` — trained checkpoint.
+- `outputs/generative_metrics_h1.json` + `outputs/generative_plots_h1/` — diversity/
+  calibration diagnostics for the checkpoint.
 
-## Tests
+## How to train
 
-`pytest steven/tests` — should be green before trusting anything above.
+Open `colab_train_h1.ipynb` on a Colab GPU runtime and run the cells top to bottom.
+
+## File tree (CVAE-relevant, under `steven/`)
+
+```
+steven/
+├── colab_train_h1.ipynb
+├── configs/
+│   └── cvae_h1.yaml
+├── data/
+│   └── spy_ohlcv_1h.parquet
+├── outputs/
+│   ├── cvae_checkpoint_h1.pt
+│   ├── generative_metrics_h1.json
+│   └── generative_plots_h1/
+└── src/
+    ├── data_pipeline.py
+    ├── momentum_pipeline.py
+    ├── train_cvae.py
+    └── models/
+        └── cvae_inpainting.py
+```
